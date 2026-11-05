@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <title>3D Gradient Descent - WebXR & Stereopsis</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #050505; font-family: sans-serif; }
+        #overlay {
+            position: absolute; top: 10px; left: 10px; color: #fff;
+            background: rgba(0, 0, 0, 0.7); padding: 15px; border-radius: 8px; z-index: 10;
+            pointer-events: auto;
+        }
+        .legend { display: flex; align-items: center; margin: 4px 0; font-size: 13px; }
+        .box { width: 14px; height: 14px; margin-right: 8px; border-radius: 3px; }
+        #stereoBtn {
+            margin-top: 10px; padding: 8px 14px; background: #0088cc;
+            color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 13px;
+        }
+        #stereoBtn:hover { background: #006699; }
+    </style>
+
+    <!-- กำหนด Import Map ให้ Three.js เรียกไฟล์ ES Module ได้อย่างถูกต้อง -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+</head>
+<body>
+    <!-- ส่วนแสดงผล UI ซ้อนทับบนหน้าจอ -->
+    <div id="overlay">
+        <h3 style="margin: 0 0 8px 0;">Gradient Descent ในมิติ 3D</h3>
+        <div>$J(x_1, x_2) = 0.2(x_1^2 + 3x_2^2)$</div>
+        <hr style="border: 0.5px solid #444; margin: 8px 0;">
+        <div class="legend"><div class="box" style="background: #ffaa00;"></div> &alpha; = 0.08 (ต่ำเกินไป)</div>
+        <div class="legend"><div class="box" style="background: #00ff66;"></div> &alpha; = 0.45 (เหมาะสม)</div>
+        <div class="legend"><div class="box" style="background: #ff3333;"></div> &alpha; = 1.60 (แกว่ง/สูงเกินไป)</div>
+        <button id="stereoBtn">สลับโหมด Cardboard VR (Stereopsis)</button>
+    </div>
+
+    <!-- โค้ดหลักของ Three.js แบบ ES Module -->
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+        // --- 1. Scene, Camera, Renderer Setup ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 5, 8);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.xr.enabled = true; // เปิดใช้งาน WebXR สำหรับแว่น VR
+        document.body.appendChild(renderer.domElement);
+
+        // ติดตั้ง VR Button (ปุ่ม "ENTER VR" จะปรากฏหากมีอุปกรณ์รองรับ)
+        document.body.appendChild(VRButton.createButton(renderer));
+
+        // ควบคุมกล้องด้วยเมาส์
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 1, 0);
+        controls.update();
+
+        // เพิ่มแสงสว่างให้มองเห็นพื้นผิวชัดเจน
+        scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(5, 10, 7);
+        scene.add(dirLight);
+
+        // --- 2. Cost Function Surface ---
+        const costFunc = (x1, x2) => 0.2 * (x1 * x1 + 3 * x2 * x2);
+        const gradFunc = (x1, x2) => ({ dx1: 0.4 * x1, dx2: 1.2 * x2 });
+
+        const size = 6;
+        const segments = 60;
+        const geom = new THREE.PlaneGeometry(size, size, segments, segments);
+        geom.rotateX(-Math.PI / 2); // พลิก Plane ให้ขนานกับพื้น
+
+        const pos = geom.attributes.position;
+        const colors = [];
+        const colorMin = new THREE.Color(0x0044ff); // สีน้ำเงินสำหรับจุดต่ำสุด
+        const colorMax = new THREE.Color(0xff2200); // สีแดงสำหรับจุดสูงสุด
+
+        // คำนวณความสูง (แกน Y) และโทนสีตาม Cost function
+        for (let i = 0; i < pos.count; i++) {
+            const x1 = pos.getX(i);
+            const x2 = pos.getZ(i);
+            const y = costFunc(x1, x2);
+            pos.setY(i, y);
+
+            const t = Math.min(y / 4.0, 1.0);
+            const c = colorMin.clone().lerp(colorMax, t);
+            colors.push(c.r, c.g, c.b);
+        }
+        geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+        geom.computeVertexNormals();
+
+        const surfMat = new THREE.MeshStandardMaterial({
+            vertexColors: true,
+            roughness: 0.3,
+            metalness: 0.1,
+            side: THREE.DoubleSide
+        });
+        const surface = new THREE.Mesh(geom, surfMat);
+        scene.add(surface);
+
+        // เพิ่มเส้น Grid (Wireframe) ซ้อนทับเพื่อให้เห็นความลึกชัดเจนขึ้น
+        const wireMat = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.15 });
+        scene.add(new THREE.Mesh(geom, wireMat));
+
+        // --- 3. Gradient Descent Paths Simulation ---
+        const startPoint = { x1: 2.5, x2: 2.0 };
+        const configs = [
+            { lr: 0.08, color: 0xffaa00 }, // สีส้ม: ก้าวสั้นไป
+            { lr: 0.45, color: 0x00ff66 }, // สีเขียว: กำลังพอดี
+            { lr: 1.60, color: 0xff3333 }  // สีแดง: ก้าวยาวไป (แกว่ง)
+        ];
+
+        const runners = configs.map(cfg => {
+            let curX1 = startPoint.x1;
+            let curX2 = startPoint.x2;
+            const pts = [];
+
+            // คำนวณตำแหน่ง 40 ก้าวล่วงหน้า
+            for (let step = 0; step < 40; step++) {
+                pts.push(new THREE.Vector3(curX1, costFunc(curX1, curX2) + 0.05, curX2));
+                const g = gradFunc(curX1, curX2);
+                curX1 -= cfg.lr * g.dx1;
+                curX2 -= cfg.lr * g.dx2;
+            }
+
+            // สร้างเส้นทาง (Path)
+            const lineGeom = new THREE.BufferGeometry().setFromPoints(pts);
+            const lineMat = new THREE.LineBasicMaterial({ color: cfg.color, linewidth: 3 });
+            scene.add(new THREE.Line(lineGeom, lineMat));
+
+            // สร้างลูกบอลตัวแทนพารามิเตอร์
+            const ball = new THREE.Mesh(
+                new THREE.SphereGeometry(0.09, 16, 16),
+                new THREE.MeshStandardMaterial({ color: cfg.color, emissive: cfg.color, emissiveIntensity: 0.4 })
+            );
+            scene.add(ball);
+
+            return { pts: pts, ball: ball, progress: 0 };
+        });
+
+        // --- 4. Stereopsis Fallback Setup (สำหรับ Cardboard VR) ---
+        let stereopsisMode = false;
+        const eyeOffset = 0.035; // ระยะห่างครึ่งหนึ่งระหว่างดวงตา 2 ข้าง
+        const leftCamera = new THREE.PerspectiveCamera(60, (window.innerWidth / 2) / window.innerHeight, 0.1, 100);
+        const rightCamera = new THREE.PerspectiveCamera(60, (window.innerWidth / 2) / window.innerHeight, 0.1, 100);
+
+        document.getElementById('stereoBtn').addEventListener('click', () => {
+            stereopsisMode = !stereopsisMode;
+            document.getElementById('stereoBtn').innerText = stereopsisMode 
+                ? "สลับโหมดกล้องปกติ (Standard 3D)" 
+                : "สลับโหมด Cardboard VR (Stereopsis)";
+            
+            // รีเซ็ตขนาดหน้าจอให้สัดส่วนถูกต้องเมื่อสลับโหมด
+            window.dispatchEvent(new Event('resize')); 
+        });
+
+        // --- 5. Render Loop ---
+        renderer.setAnimationLoop(() => {
+            // อัปเดตอนิเมชันลูกบอลให้ไหลตามเส้นทาง
+            runners.forEach(r => {
+                r.progress += 0.012;
+                if (r.progress >= r.pts.length - 1) r.progress = 0;
+
+                const idx = Math.floor(r.progress);
+                const frac = r.progress - idx;
+                r.ball.position.lerpVectors(r.pts[idx], r.pts[idx + 1], frac); // Interpolation เคลื่อนที่แบบนุ่มนวล
+            });
+
+            // ตรรกะการเรนเดอร์ภาพ
+            if (renderer.xr.isPresenting) {
+                // 5.1 โหมด WebXR (เสียบแว่น VR / รันบนเบราว์เซอร์ของแว่นโดยตรง)
+                renderer.render(scene, camera);
+            } else if (stereopsisMode) {
+                // 5.2 โหมด Stereopsis (แบ่งจอซ้าย/ขวา สำหรับมือถือใส่แว่น Cardboard)
+                const w = window.innerWidth;
+                const h = window.innerHeight;
+
+                // ซิงก์ตำแหน่งกล้องซ้าย-ขวาเข้ากับกล้องหลัก
+                leftCamera.position.copy(camera.position);
+                leftCamera.rotation.copy(camera.rotation);
+                leftCamera.translateX(-eyeOffset);
+
+                rightCamera.position.copy(camera.position);
+                rightCamera.rotation.copy(camera.rotation);
+                rightCamera.translateX(eyeOffset);
+
+                renderer.setScissorTest(true);
+
+                // เรนเดอร์จอตาซ้าย
+                renderer.setScissor(0, 0, w / 2, h);
+                renderer.setViewport(0, 0, w / 2, h);
+                leftCamera.aspect = (w / 2) / h;
+                leftCamera.updateProjectionMatrix();
+                renderer.render(scene, leftCamera);
+
+                // เรนเดอร์จอตาขวา
+                renderer.setScissor(w / 2, 0, w / 2, h);
+                renderer.setViewport(w / 2, 0, w / 2, h);
+                rightCamera.aspect = (w / 2) / h;
+                rightCamera.updateProjectionMatrix();
+                renderer.render(scene, rightCamera);
+
+                renderer.setScissorTest(false);
+            } else {
+                // 5.3 โหมดหน้าจอปกติ (Standard 3D View)
+                renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
+                renderer.render(scene, camera);
+            }
+        });
+
+        // --- 6. รองรับการปรับขนาดหน้าจอ (Window Resize) ---
+        window.addEventListener('resize', () => {
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+            
+            camera.aspect = w / h;
+            camera.updateProjectionMatrix();
+            renderer.setSize(w, h);
+        });
+    </script>
+</body>
+</html>
