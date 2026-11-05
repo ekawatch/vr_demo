@@ -2,73 +2,51 @@
 <html lang="th">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>3dPlots — ผิวควอดริกใน WebXR (SCMA292 Lesson 12)</title>
-
-<!--
-  3dPlots — สื่อ WebXR สำหรับ "กราฟในพีชคณิตเชิงเส้นหลายตัวแปร / ผิวควอดริก"
-  ----------------------------------------------------------------------------
-  วิธีรัน (WebXR ต้อง secure context):
-      python3 -m http.server 8080      แล้วเปิด http://localhost:8080/3dPlots/
-  - หน้าแรก "สะอาด": บนจอแบนไม่มีข้อความใด ๆ บนหน้าจอ — มีเพียง 2 ตัวควบคุม (DOM) เท่านั้น
-      • ปุ่ม "เข้าโหมด VR" (หรือ "เข้าโหมด AR" บนเครื่องที่ไม่มี VR) — มุมล่างซ้าย
-      • ลิงก์ "← index" กลับหน้าสารบัญ — มุมบนซ้าย
-  - มี headset / โทรศัพท์ที่รองรับ WebXR : กดปุ่มเข้าโหมด → ป้ายข้อความใน 3D (ชื่อผิว + สมการ + คำชี้แจง)
-    จะแสดงเฉพาะขณะที่กำลังอยู่ใน session XR เท่านั้น
-  - ไม่มี WebXR : โหมดจอแบน — ลากเมาส์/สัมผัสเพื่อมอง, กด n หรือ space เพื่อเปลี่ยนรูป (ไม่มีข้อความบนจอ)
-  - อยากได้ข้อความบนจอแบนอีก : เปิดด้วย ?ui=1 ; ?ui=0 ซ่อนทั้งข้อความและตัวควบคุม
-    (เรขาคณิตของกราฟ — แท่น/วงแหวน/เส้นกริด/แกน — แสดงตามเดิมเสมอ)
-
-  พฤติกรรมหลักตามโจทย์:
-  - ผู้ใช้ยืนที่ origin; แท่นวางกราฟอยู่ไกล 3 m, ตัวกราฟสูงราว 2 m
-  - กราฟหมุนทวนเข็ม (CCW) รอบแกน z อย่างช้า ๆ (z คณิตศาสตร์ → Y โลก; +rotation.y = CCW มองจากบน)
-  - จุดaim กึ่งกลางจอ (gaze cursor): เหล่มองวงแหวนเรืองแสงที่ฐานแท่น → สลับไปผิวถัดไป
-  - ลำดับ: hyperbolic paraboloid → sphere → ellipsoid → paraboloid →
-           hyperboloid one sheet → hyperboloid two sheets → cone → cylinder
-  - ทุกผิวถูกพารามิetrizea บน grid (u,v) เดียวกันจึง morph กันได้อย่างต่อเนื่อง
-
-  การสืบทอดจาก saddle-xr.html เดิม: ตัดแผง side panel ทิ้งทั้งหมด
--->
 
 <style>
   html,body { margin:0; height:100%; overflow:hidden; background:#0b1220;
               font-family:system-ui,"Segoe UI",Tahoma,sans-serif; }
   canvas { display:block; }
-  /* unified first-page UI (same position in all 5 media) */
+  /* unified first-page UI */
   #backIdx { position:fixed; left:14px; top:14px; z-index:40;
     font:600 14px/1.2 system-ui,"Noto Sans Thai",sans-serif; padding:9px 14px;
     border:1px solid #4cc9f0; background:#0b1220cc; color:#e8f4ff; border-radius:8px; text-decoration:none; }
   #enterXR, #xrBtn { position:fixed; left:14px; bottom:14px; z-index:40;
     font:600 16px/1.2 system-ui,"Noto Sans Thai",sans-serif; padding:10px 18px;
     border:1px solid #4cc9f0; background:#12314a; color:#e8f4ff; border-radius:8px; cursor:pointer; }
+  /* ปุ่มออกจากโหมด Stereo VR (สำหรับเครื่องที่ไม่มี WebXR) */
+  #exitVR { position:fixed; right:14px; top:14px; z-index:40;
+    font:600 14px/1.2 system-ui,"Noto Sans Thai",sans-serif; padding:9px 14px;
+    border:1px solid #ff6b6b; background:#200b12cc; color:#ffe8e8; border-radius:8px; cursor:pointer; display:none; }
+  /* เส้นกึ่งกลางช่วยจัดตำแหน่งโทรศัพท์กับสันแว่น VR */
+  #vrDivider { position:fixed; left:50%; top:0; bottom:0; width:2px;
+    background:rgba(76,201,240,0.25); transform:translateX(-50%);
+    z-index:35; pointer-events:none; display:none; }
 </style>
 
 <script type="module">
 import * as THREE from './three.module.js';
 
-/* ================= flag ของหน้าแรก (ใช้เหมือนกันทั้ง 5 สื่อ) =================
-   TEXT_UI : เปิด "การ์ดข้อความในฉาก" (ป้ายชื่อผิว + สมการ + คำชี้แจง) บนจอแบน เมื่อ URL มี ?ui=1
-             ภายใน XR session ที่กำลัง presentation ข้อความแสดงเสมอ (presenting || TEXT_UI)
-   UI_OFF  : ?ui=0 → ซ่อนทั้งข้อความในฉาก และตัวควบคุม DOM ทั้งสอง (ปุ่มเข้า XR / ลิงก์ index)
-   ค่าเริ่มต้น (ไม่มี ?ui) : หน้าเปล่าไม่มีข้อความ — เหลือแค่ปุ่มเข้า XR (ล่างซ้าย) + ← index (บนซ้าย)  */
+/* ================= flag ของหน้าแรก ================= */
 const UI_PARAMS = new URLSearchParams(location.search);
 const TEXT_UI = UI_PARAMS.get('ui') === '1';
 const UI_OFF  = UI_PARAMS.get('ui') === '0';
-let presenting = false;                 // ตาม session start/end ใน tryEnterXR
+let presenting = false;                 // อยู่ใน session XR จริง หรือ Stereo fallback
+let stereoMode = false;                 // จำลอง Stereo 2 จอสำหรับ iPhone / Cardboard
 
-/* ================= ค่าคงที่เชิงergonomics ================= */
-const PEDIESTAL_H = 0.35;            // ความสูงแท่น (m)
+/* ================= ค่าคงที่เชิง ergonomics ================= */
+const PEDIESTAL_H = 0.35;
 const PEDIESTAL_R = 0.55;
-const PLOT_Z      = -3.0;            // ผู้ใช้ยืนที่ origin → กราฟอยู่ไกล 3 m
-const GAP         = 0.30;            // ช่องว่างจากฐานแท่นถึงขอบล่างกราฟ (ให้ ring/แท่นโผล่จากมุมมองตรง)
-const N           = 84;              // ความละเอียด grid ร่วมของทุกผิว
-const SPIN        = 0.13;            // rad/s ≈ 7.4°/s — "ช้า ๆ" ทวนเข็มรอบ z
-const MORPH_MS    = 1100;            // เวลา morph ระหว่างผิว
-const COOLDOWN_MS = 800;             // กันสลับรัวเมื่อ gaze ขอบวงแหวน
-const VERTS = (N+1)*(N+1);
+const PLOT_Z      = -3.0;            // จุดกราฟอยู่ไกล 3 m
+const GAP         = 0.30;
+const N           = 84;
+const SPIN        = 0.13;
+const MORPH_MS    = 1100;
+const COOLDOWN_MS = 800;
+const VERTS       = (N+1)*(N+1);
 
-// colormap หลายขั้น: ต่ำ=เย็น → สูง=อุ่น (interp ตรงข้ามสีใน linear space ให้สีมอซอ จึงใช้หลาย stop)
-// hex constructor ผ่าน ColorManagement → เก็บเป็น linear ตรงกับ color attribute
 const STOPS = [new THREE.Color('#1c7ed6'), new THREE.Color('#22b8cf'),
                new THREE.Color('#69db7c'), new THREE.Color('#ffa94d')];
 function rampColor(t, out){
@@ -78,9 +56,7 @@ function rampColor(t, out){
   out.r = a.r + (b.r - a.r)*f; out.g = a.g + (b.g - a.g)*f; out.b = a.b + (b.b - a.b)*f;
 }
 
-/* ================= ชุดผิวควอดริก (ตำรา calculus ทั่วไป) =================
-   ฟังก์ชัน param ก่อร่างในพิกัดคณิตศาสตร์ (x, y, z), z = ขึ้น;
-   ระบบ world: X = x, Y = z, Z = y  (เหมือน toWorld ใน saddle-xr เดิม)      */
+/* ================= ชุดผิวควอดริก ================= */
 const TAU = Math.PI*2;
 function sphereParam(u,v){
   const th = TAU*u, ph = Math.PI*(v-0.5), cp = Math.cos(ph);
@@ -90,8 +66,7 @@ const SURFACES = [
   { id:'saddle',  th:'พาราโบลาไฮเพอร์โบลิก (อานม้า)',  eq:'z = x² − y²',
     p:(u,v)=>{ const x=2*u-1, y=2*v-1; return [x, y, 1.3*(x*x - y*y)]; } },
   { id:'sphere',  th:'ทรงกลม',  eq:'x² + y² + z² = r²',  p:sphereParam },
-  { id:'ellipsoid', th:' ellipsoid (ทรงรี)', eq:'x²/a² + y²/b² + z²/c² = 1',
-    /* อัตราส่วนแกนเห็นชัด: a:c = 0.62:1.35 (รีชัดเจนแม้ nhìn จากด้านหน้า) */
+  { id:'ellipsoid', th:'ellipsoid (ทรงรี)', eq:'x²/a² + y²/b² + z²/c² = 1',
     p:(u,v)=>{ const q=sphereParam(u,v); q[0]*=0.62; q[1]*=0.85; q[2]*=1.35; return q; } },
   { id:'paraboloid', th:'พาราโบลอยด์ (วงรี)', eq:'z = x² + y²',
     p:(u,v)=>{ const x=2*u-1, y=2*v-1; return [x, y, 1.6*(x*x + y*y) - 1.6]; } },
@@ -99,9 +74,6 @@ const SURFACES = [
     p:(u,v)=>{ const th=TAU*u, t=(v-0.5)*2, c=1.35;
                return [Math.cosh(t*c)*Math.cos(th), Math.cosh(t*c)*Math.sin(th), Math.sinh(t*c)]; } },
   { id:'hyperboloid2', th:'ไฮเพอร์โบลอยด์สองแผ่น', eq:'z² − x² − y² = 1',
-    /* rows ติด seam ทั้งสองฝั่ง ยุบเป็นวงรัศมีจิ๋ว (1e-4) บนจุด apex ของแต่ละแผ่น
-       → quad ข้ามช่องว่างกลายเป็น sliver sub-pixel เล็กเกินกว่า rasterizer จะวาด
-       (ต่างจากจุดร่วมจริงของ cone ที่เป็น apex จริงของสอง nappe) */
     p:(u,v)=>{ const th=TAU*u, t=(v-0.5)*2, sgn=(t>0)?1:-1, at=Math.abs(t);
                const a = (at < 0.03) ? 1e-4 : at*1.35;
                return [Math.sinh(a)*Math.cos(th), Math.sinh(a)*Math.sin(th), sgn*Math.cosh(a)]; } },
@@ -112,8 +84,6 @@ const SURFACES = [
     p:(u,v)=>{ const th=TAU*u; return [Math.cos(th), Math.sin(th), 2*v-1]; } },
 ];
 
-/* สร้าง vertex array ในพิกัด local ของ group (x,z รอบศูนย์; y อยู่เหนือแท่น)
-   normalize ต่อ surface: ให้ max(รัศมีแนวนอน, ครึ่งสูง) = 1 → สูง ≤ 2 m  */
 function bakeSurface(surf){
   const raw = new Float32Array(VERTS*3);
   let maxR = 0, maxZ = 0;
@@ -137,8 +107,8 @@ function bakeSurface(surf){
 
 /* ================= สถานะ ================= */
 const baked = SURFACES.map(bakeSurface);
-let current = 0;                       // index ผิวที่กำลังแสดง
-let curPos  = baked[0].pos.slice();   // จุดที่กำลังแสดงจริง (ระหว่าง morph)
+let current = 0;
+let curPos  = baked[0].pos.slice();
 let morphFrom = null, morphStart = 0;
 let lastSwitch = -1e9, gazeOnBase = false;
 
@@ -155,14 +125,20 @@ scene.background = new THREE.Color(0x0b1220);
 scene.fog = new THREE.Fog(0x0b1220, 12, 22);
 
 const camera = new THREE.PerspectiveCamera(65, innerWidth/innerHeight, 0.05, 60);
-camera.position.set(0, 1.6, 0);           // ระดับสายตาผู้ยืน — เหมือนจุดยืนใน XR
+camera.position.set(0, 1.6, 0);
+camera.focus = 3.0;                      // ระยะโฟกัสพอดีกับตำแหน่งแท่นกราฟ 3 m
 camera.rotation.order = 'YXZ';
+
+/* กล้อง Stereo สำหรับ Stereopsis Fallback */
+const stereoCamera = new THREE.StereoCamera();
+stereoCamera.aspect = 0.5;               // จอแต่ละข้างกว้างครึ่งหนึ่งของหน้าจอเต็ม
+stereoCamera.eyeSep = 0.064;             // ระยะห่างกึ่งกลางตาทั่วไป (64 มม.)
 
 scene.add(new THREE.HemisphereLight(0x9fb8d0, 0x141c28, 0.95));
 const dl = new THREE.DirectionalLight(0xffffff, 1.1); dl.position.set(2.5, 4, 1.5); scene.add(dl);
 const dl2 = new THREE.DirectionalLight(0x88bbff, 0.35); dl2.position.set(-3, 2, -2); scene.add(dl2);
 
-/* ---- พื้น (ซ่อนในโหมด immersive-ar เพราะเห็นห้องจริง) ---- */
+/* ---- พื้น ---- */
 const floor = new THREE.Mesh(
   new THREE.CircleGeometry(14, 64),
   new THREE.MeshStandardMaterial({ color:0x10161f, roughness:0.95 }));
@@ -186,29 +162,25 @@ const baseRing = new THREE.Mesh(
   new THREE.MeshBasicMaterial({ color:0x4cc9f0, transparent:true, opacity:0.55, side:THREE.DoubleSide }));
 baseRing.rotation.x = -Math.PI/2; baseRing.position.set(0, 0.012, PLOT_Z); scene.add(baseRing);
 
-/* ก้านเรืองแสงเล็ก ๆ เชื่อมแท่นกับขอบล่างกราฟ — บอกว่า "ฐาน" คือจุด gaze */
 const stem = new THREE.Mesh(
   new THREE.CylinderGeometry(0.085, 0.085, GAP + 0.03, 24),
   new THREE.MeshBasicMaterial({ color:0x4cc9f0, transparent:true, opacity:0.32 }));
 stem.position.set(0, PEDIESTAL_H + (GAP+0.03)/2 - 0.015, PLOT_Z); scene.add(stem);
 
-/* ปริมาตรแสดงจาง ๆ บอกขอบเขต "กรอบ ~2 m" */
 const halo = new THREE.Mesh(
   new THREE.CylinderGeometry(1.15, 1.15, 2.3, 64, 1, true),
   new THREE.MeshBasicMaterial({ color:0x4cc9f0, transparent:true, opacity:0.04, side:THREE.BackSide }));
 halo.position.set(0, PEDIESTAL_H + GAP + 1.15, PLOT_Z); scene.add(halo);
 
-/* ---- mesh ผิวกราฟ (grid ร่วม + wireframe) ---- */
+/* ---- mesh ผิวกราฟ ---- */
 const geom = new THREE.BufferGeometry();
 const idxFull = [], idxNoSeam = [];
 for (let j=0; j<N; j++) for (let i=0; i<N; i++) {
   const a = j*(N+1)+i, b = a+1, c = a+(N+1), d = c+1;
   idxFull.push(a,b,d, a,d,c);
-  if (j !== N/2) idxNoSeam.push(a,b,d, a,d,c);    // ตัด quad ข้ามช่องว่างระหว่างสองแผ่น (เส้นลวดจะวาดทุก edge ≥1px)
+  if (j !== N/2) idxNoSeam.push(a,b,d, a,d,c);
 }
 geom.setIndex(idxFull);
-/* renderer cache wireframe index attribute ของ geometry ไว้
-   จะ rebuild เฉพาะเมื่อ index.version เพิ่มขึ้น → ต้อง stamp versionใหม่ทุกครั้งที่ swap */
 let idxVersion = 1;
 function applyMeshIndex(idxA){ geom.setIndex(idxA); geom.index.version = idxVersion++; }
 baked.forEach((b,i)=> { b.idx = SURFACES[i].id === 'hyperboloid2' ? idxNoSeam : idxFull; });
@@ -222,7 +194,7 @@ const surfMesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
 const wireMesh = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({
   color:0xd9e7f5, wireframe:true, transparent:true, opacity:0.14 }));
 
-const plotGroup = new THREE.Group();          // หมุนรอบแกน Y โลก = แกน z คณิต
+const plotGroup = new THREE.Group();
 plotGroup.position.set(0, PEDIESTAL_H, PLOT_Z);
 plotGroup.add(surfMesh, wireMesh);
 scene.add(plotGroup);
@@ -235,9 +207,7 @@ const dot = new THREE.Mesh(new THREE.CircleGeometry(0.0035, 16),
   new THREE.MeshBasicMaterial({ color:0xffffff, transparent:true, opacity:0.9 }));
 reticle.add(ring, dot); scene.add(reticle);
 
-/* ---- ป้ายชื่อผิวใน 3D (sprite — ไม่มี DOM panel) ----
-   วางเป็น "การ์ดข้อมูล" ลอยที่ระยะ ~1.7 m จากผู้ใช้ ระดับ 0.95 m (gaze ลงเล็กน้อยสบาย)
-   อยู่หน้ากรอบภาพ (z=-1.7 < near edge ของ plot ที่ -2) จึงบังจากทุกมุมมอง = อ่านได้ทุกผิว */
+/* ---- ป้ายชื่อผิวใน 3D ---- */
 function makeLabel(surf){
   const W = 1024, H = 340;
   const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
@@ -259,7 +229,7 @@ function makeLabel(surf){
   g.font = '30px ' + THAI_FONT;
   g.fillText('เหล่มองวงแหวนเรืองแสงที่ฐาน → เปลี่ยนเป็นผิวถัดไป', W/2, 252);
   g.font = '26px ' + THAI_FONT;
-  g.fillText('(บนจอแบน: หรือกดปุ่ม n)', W/2, 298);
+  g.fillText('(หรือแตะหน้าจอ / กดปุ่ม n)', W/2, 298);
 
   const tex = new THREE.CanvasTexture(cv);
   tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
@@ -270,22 +240,19 @@ function makeLabel(surf){
 }
 const labels = SURFACES.map(s => { const l = makeLabel(s); scene.add(l); return l; });
 
-/* ---- gate ของข้อความในฉาก: แสดงเฉพาะ presenting (XR) หรือ ?ui=1 ----
-       เรขาคณิตอื่นของกราฟ (แท่น/วงแหวน/กริด/reticle) ไม่ถูก gate — เป็นส่วนของ plot เอง */
 const textOn = () => presenting || TEXT_UI;
-let labelFade = 1;                      // opacity เป้าหมายของ label ปัจจุบัน (ขั้นบันไดตาม morph)
+let labelFade = 1;
 function refreshLabels(){
   for (const l of labels) { l.visible = textOn(); l.material.opacity = 0; }
   if (textOn()) labels[current].material.opacity = labelFade;
 }
-refreshLabels();                        // ค่าเริ่มต้นของหน้าแรก: ไม่มีข้อความแม้แผ่นเดียว
-window.__debug = { THREE, SURFACES, baked, geom, plotGroup, camera, label0: labels[0], pedestal, rim, baseRing, stem, halo };  // test hook
+refreshLabels();
 
 /* ================= morph ระหว่างผิว ================= */
 function paintColors(){
   const c = colAttr.array, scratch = new THREE.Color();
   for (let k=0; k<curPos.length; k+=3) {
-    const t = (curPos[k+1] - GAP) / (2 + GAP*0.7);   // 0 = ขอบล่าง, 1 = ขอบบน
+    const t = (curPos[k+1] - GAP) / (2 + GAP*0.7);
     rampColor(t, scratch);
     c[k] = scratch.r; c[k+1] = scratch.g; c[k+2] = scratch.b;
   }
@@ -296,10 +263,10 @@ geom.computeVertexNormals();
 
 function switchToNext(now){
   const next = (current + 1) % SURFACES.length;
-  labels[current].material.opacity = 0;              // label เก่าหายทันที (กันทับซ้อน)
+  labels[current].material.opacity = 0;
   labelFade = 0;
   current = next;
-  applyMeshIndex(idxFull);                           // ระหว่าง morph ใช้ grid เต็ม (continuity)
+  applyMeshIndex(idxFull);
   morphFrom = curPos.slice();
   morphStart = now;
   lastSwitch = now;
@@ -311,14 +278,14 @@ function stepMorph(now){
   if (!morphFrom) return;
   const k = Math.min(1, (now - morphStart) / MORPH_MS);
   const target = baked[current].pos;
-  const s = k<0.5 ? 2*k*k : 1-2*(1-k)*(1-k);        // ease in-out
+  const s = k<0.5 ? 2*k*k : 1-2*(1-k)*(1-k);
   for (let i=0; i<curPos.length; i++) curPos[i] = morphFrom[i] + (target[i]-morphFrom[i])*s;
   geom.attributes.position.needsUpdate = true;
   geom.computeVertexNormals();
   paintColors();
-  labelFade = Math.min(1, Math.max(0, (k-0.45)/0.35));          // ค่า opacity เป้าหมาย (เหมือนเดิม)
-  labels[current].material.opacity = textOn() ? labelFade : 0;   // โหมดจอแบน: ไม่แสดงข้อความ
-  if (k >= 1) { morphFrom = null; applyMeshIndex(baked[current].idx); }  // settle → index เฉพาะผิว (hyperboloid2 ไม่มี seam; bump version ให้ wireframe rebuild)
+  labelFade = Math.min(1, Math.max(0, (k-0.45)/0.35));
+  labels[current].material.opacity = textOn() ? labelFade : 0;
+  if (k >= 1) { morphFrom = null; applyMeshIndex(baked[current].idx); }
 }
 
 /* ================= gaze ที่ฐาน → สลับผิว ================= */
@@ -336,38 +303,196 @@ function gazeCheck(now){
   const hit = raycaster.intersectObjects(baseTargets, false).length > 0;
   if (hit && !gazeOnBase && !morphFrom && now - lastSwitch > COOLDOWN_MS) switchToNext(now);
   gazeOnBase = hit;
-  // วงแหวนฐานหายใจเบา ๆ ให้สังเกตได้ และสว่างขึ้นเมื่อกำลัง gaze
   baseRing.material.opacity = hit ? 0.95 : 0.55 + 0.13*Math.sin(now*0.004);
   rim.material.opacity      = hit ? 1.0 : 0.85;
 }
 
-/* ================= โหมดจอแบน: ลากเพื่อมอง + คีย์ลัด ================= */
+/* ================= จัดการ Gyroscope & Orientation ================= */
+const _zee = new THREE.Vector3(0, 0, 1);
+const _euler = new THREE.Euler();
+const _q0 = new THREE.Quaternion();
+const _q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)); // หมุนชดเชยกล้องชี้ไปด้านหลังเครื่อง
+const qDevice = new THREE.Quaternion();
+const qOffset = new THREE.Quaternion();
+let needsRecenter = true;
+let deviceOrientation = null;
+let orientationActive = false;
+
+function setupDeviceOrientation() {
+  if (orientationActive) return;
+  const onOrientation = (e) => {
+    if (e.alpha !== null || e.beta !== null || e.gamma !== null) {
+      deviceOrientation = e;
+    }
+  };
+  window.addEventListener('deviceorientation', onOrientation, true);
+  orientationActive = true;
+}
+
+function getScreenOrientation() {
+  if (screen.orientation && typeof screen.orientation.angle === 'number') {
+    return screen.orientation.angle;
+  }
+  if (typeof window.orientation === 'number') {
+    return window.orientation;
+  }
+  return 0;
+}
+
+async function requestOrientationPermission() {
+  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    try {
+      const perm = await DeviceOrientationEvent.requestPermission();
+      return perm === 'granted';
+    } catch (e) {
+      console.warn('Orientation permission error:', e);
+      return false;
+    }
+  }
+  return true;
+}
+
+function updateCameraOrientation() {
+  if (deviceOrientation && (deviceOrientation.alpha !== null || deviceOrientation.beta !== null)) {
+    const alpha = THREE.MathUtils.degToRad(deviceOrientation.alpha || 0);
+    const beta  = THREE.MathUtils.degToRad(deviceOrientation.beta || 0);
+    const gamma = THREE.MathUtils.degToRad(deviceOrientation.gamma || 0);
+    const orient = THREE.MathUtils.degToRad(getScreenOrientation());
+
+    _euler.set(beta, alpha, -gamma, 'YXZ');
+    qDevice.setFromEuler(_euler);
+    qDevice.multiply(_q1);
+    qDevice.multiply(_q0.setFromAxisAngle(_zee, -orient));
+
+    // ปรับมุมมองรอบแรก ให้หันหน้าตรงเข้าหากราฟ (z = -3) พอดี
+    if (needsRecenter) {
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(qDevice);
+      fwd.y = 0;
+      if (fwd.lengthSq() > 1e-4) {
+        fwd.normalize();
+        qOffset.setFromUnitVectors(fwd, new THREE.Vector3(0, 0, -1));
+        needsRecenter = false;
+      }
+    }
+
+    camera.quaternion.multiplyQuaternions(qOffset, qDevice);
+  } else {
+    camera.rotation.y = yaw;
+    camera.rotation.x = pitch;
+  }
+}
+
+/* ================= โหมดจอแบน: ลากเพื่อมอง + คีย์ลัด + แตะ ================= */
 let dragging = false, px = 0, py = 0, yaw = 0, pitch = -0.04;
-camera.rotation.y = yaw; camera.rotation.x = pitch;      // ใช้ค่าเริ่มต้นจริงกับกล้อง
+let pointerDownTime = 0, pointerDownX = 0, pointerDownY = 0;
+camera.rotation.y = yaw; camera.rotation.x = pitch;
+
 const el = renderer.domElement;
-el.addEventListener('pointerdown', e => { dragging = true; px = e.clientX; py = e.clientY; });
-window.addEventListener('pointerup',   () => { dragging = false; });
+el.addEventListener('pointerdown', e => {
+  dragging = true;
+  px = e.clientX; py = e.clientY;
+  pointerDownTime = performance.now();
+  pointerDownX = e.clientX; pointerDownY = e.clientY;
+});
+window.addEventListener('pointerup', e => {
+  dragging = false;
+  if (stereoMode) {
+    const elapsed = performance.now() - pointerDownTime;
+    const dist = Math.hypot(e.clientX - pointerDownX, e.clientY - pointerDownY);
+    // การแตะหน้าจอแบบไม่ลาก (จำลองปุ่มกดของแว่น Cardboard) → สลับผิวถัดไป
+    if (elapsed < 300 && dist < 15) {
+      if (!morphFrom) switchToNext(performance.now());
+    }
+  }
+});
 window.addEventListener('pointermove', e => {
   if (!dragging || renderer.xr.isPresenting) return;
-  yaw   -= (e.clientX - px) * 0.0035;
-  pitch -= (e.clientY - py) * 0.0035;
-  pitch = Math.max(-1.35, Math.min(1.35, pitch));
+  const dx = (e.clientX - px) * 0.0035;
+  const dy = (e.clientY - py) * 0.0035;
   px = e.clientX; py = e.clientY;
-  camera.rotation.y = yaw; camera.rotation.x = pitch;
+
+  if (stereoMode) {
+    // ในโหมดสเตอริโอ ลากนิ้วเพื่อหมุนชดเชยมุมมองแนวนอนได้
+    const rotY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -dx);
+    qOffset.premultiply(rotY);
+  } else {
+    yaw   -= dx;
+    pitch -= dy;
+    pitch = Math.max(-1.35, Math.min(1.35, pitch));
+    camera.rotation.y = yaw; camera.rotation.x = pitch;
+  }
 });
+
 window.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && stereoMode) {
+    stopStereoVR();
+    return;
+  }
   if (e.key === 'n' || e.key === 'N' || e.key === ' ') {
     e.preventDefault();
     if (!morphFrom) switchToNext(performance.now());
   }
 });
+
 window.addEventListener('resize', () => {
   if (renderer.xr.isPresenting) return;
-  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
 
-/* ================= WebXR: VR → AR → flat ================= */
+/* ================= Stereo VR Fallback Functions ================= */
+function startStereoVR() {
+  stereoMode = true;
+  presenting = true;
+  needsRecenter = true;
+  window.__plotState.mode = 'stereo-vr';
+
+  setupDeviceOrientation();
+
+  if (document.documentElement.requestFullscreen) {
+    document.documentElement.requestFullscreen().catch(() => {});
+  } else if (document.documentElement.webkitRequestFullscreen) {
+    document.documentElement.webkitRequestFullscreen();
+  }
+
+  if (screen.orientation && screen.orientation.lock) {
+    screen.orientation.lock('landscape').catch(() => {});
+  }
+
+  refreshUi();
+}
+
+function stopStereoVR() {
+  stereoMode = false;
+  presenting = false;
+  window.__plotState.mode = 'flat';
+
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+  } else if (document.webkitFullscreenElement) {
+    document.webkitExitFullscreen();
+  }
+
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  camera.rotation.y = yaw;
+  camera.rotation.x = pitch;
+  camera.rotation.z = 0;
+
+  renderer.setScissorTest(false);
+  renderer.setViewport(0, 0, innerWidth, innerHeight);
+
+  refreshUi();
+}
+
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && stereoMode) {
+    stopStereoVR();
+  }
+});
+
+/* ================= WebXR Native ================= */
 async function tryEnterXR(){
   for (const mode of ['immersive-vr', 'immersive-ar']) {
     try {
@@ -379,65 +504,114 @@ async function tryEnterXR(){
       await renderer.xr.setSession(session);
       if (mode === 'immersive-ar') { scene.background = null; floor.visible = false; grid.visible = false; scene.fog = null; }
       window.__plotState.mode = (mode === 'immersive-vr') ? 'xr-vr' : 'xr-ar';
-      presenting = true;  refreshUi();               // เข้า XR แล้ว: ซ่อนปุ่ม+ลิงก์, แสดงข้อความในฉาก
+      presenting = true;
+      refreshUi();
       session.addEventListener('end', () => {
         window.__plotState.mode = 'flat';
         renderer.xr.enabled = false;
-        presenting = false; refreshUi();             // กลับจอแบน: ซ่อนข้อความ, แสดงปุ่มกลับตามเดิม
+        presenting = false;
+        refreshUi();
       });
       return true;
-    } catch (err) { /* ลองโหมดถัดไป */ }
+    } catch (err) {}
   }
   return false;
 }
 
-const enterBtn = document.getElementById('enterXR');
-const backIdx  = document.getElementById('backIdx');
-let xrReady = false;                     // มี immersive-vr / immersive-ar ให้เข้าหรือไม่
+const enterBtn  = document.getElementById('enterXR');
+const exitBtn   = document.getElementById('exitVR');
+const vrDivider = document.getElementById('vrDivider');
+const backIdx   = document.getElementById('backIdx');
+let xrReady = false;
 
-/* สถานะตัวควบคุมบนหน้า: ซ่อนเมื่อ ?ui=0 และซ่อนตลอดขณะที่ XR กำลัง presentation
-   (ปุ่มแสดงเฉพาะเมื่อ probe พบ WebXR — เงื่อนไขเดิมของไฟล์) */
 function refreshUi(){
-  enterBtn.style.display = (xrReady && !UI_OFF && !presenting) ? 'flex' : 'none';
-  backIdx.style.display  = (!UI_OFF && !presenting) ? '' : 'none';
+  enterBtn.style.display  = (xrReady && !UI_OFF && !presenting) ? 'flex' : 'none';
+  backIdx.style.display   = (!UI_OFF && !presenting) ? '' : 'none';
+  exitBtn.style.display   = (stereoMode && !UI_OFF) ? 'block' : 'none';
+  vrDivider.style.display = (stereoMode) ? 'block' : 'none';
   refreshLabels();
 }
+
+exitBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  stopStereoVR();
+});
+
 (async () => {
   const vr = !!navigator.xr && await navigator.xr.isSessionSupported('immersive-vr').catch(()=>false);
   const ar = !!navigator.xr && await navigator.xr.isSessionSupported('immersive-ar').catch(()=>false);
-  xrReady = vr || ar;
-  if (xrReady) {
-    enterBtn.textContent = vr ? 'เข้าโหมด VR' : 'เข้าโหมด AR';   // ปุ่มเดียวบนหน้า — ไม่มีข้อความอื่น
-    enterBtn.addEventListener('click', async () => {
-      enterBtn.style.display = 'none';
-      await tryEnterXR();
-    });
-  }
+  
+  // พร้อมเสมอ: ถ้ามี WebXR จะใช้ WebXR ถ้าไม่มี (เช่น iPhone) จะใช้ Stereopsis VR
+  xrReady = true;
+  enterBtn.textContent = (vr || !ar) ? 'เข้าโหมด VR' : 'เข้าโหมด AR';
+
+  enterBtn.addEventListener('click', async () => {
+    // ขอสิทธิ์ DeviceOrientation ภายใน user gesture สำหรับ iOS
+    await requestOrientationPermission();
+
+    const entered = await tryEnterXR();
+    if (!entered) {
+      // Fallback สู่โหมด Stereopsis 2 ฝั่งสำหรับแว่น VR
+      startStereoVR();
+    }
+  });
+
   refreshUi();
 })();
 
-/* ================= วังวนหลัก (ใช้ได้ทั้ง XR และจอแบน) ================= */
+/* ================= วังวนหลัก ================= */
 let lastT = performance.now();
 renderer.setAnimationLoop((t) => {
   const now = performance.now();
   const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
 
-  plotGroup.rotation.y += SPIN * dt;               // +Y โลก = CCW เมื่อมองจากบน
+  plotGroup.rotation.y += SPIN * dt;
   stepMorph(now);
+
+  if (stereoMode) {
+    updateCameraOrientation();
+  }
+
   gazeCheck(now);
 
-  // วาง reticle 1.1 m ข้างหน้า viewpoint เสมอ (ทั้ง XR และ flat)
   const view = activeView();
   view.getWorldPosition(camOrigin); view.getWorldDirection(camDir);
   reticle.position.copy(camOrigin).addScaledVector(camDir, 1.1);
   reticle.quaternion.copy(view.getWorldQuaternion(new THREE.Quaternion()));
 
-  renderer.render(scene, camera);                  // ใน XR three จะใช้ XRCamera จริง
+  if (stereoMode) {
+    // เรนเดอร์ 2 ฝั่งแบบ Stereopsis
+    const halfW = Math.floor(innerWidth / 2);
+    camera.updateMatrixWorld();
+    stereoCamera.update(camera);
+
+    const autoClear = renderer.autoClear;
+    renderer.autoClear = false;
+    renderer.clear();
+    renderer.setScissorTest(true);
+
+    // ตาซ้าย
+    renderer.setScissor(0, 0, halfW, innerHeight);
+    renderer.setViewport(0, 0, halfW, innerHeight);
+    renderer.render(scene, stereoCamera.cameraL);
+
+    // ตาขวา
+    renderer.setScissor(halfW, 0, innerWidth - halfW, innerHeight);
+    renderer.setViewport(halfW, 0, innerWidth - halfW, innerHeight);
+    renderer.render(scene, stereoCamera.cameraR);
+
+    renderer.setScissorTest(false);
+    renderer.autoClear = autoClear;
+  } else {
+    renderer.render(scene, camera);
+  }
 });
 </script>
 </head>
 <body>
 <a id="backIdx" href="../index.html">← index</a>
 <button id="enterXR" style="display:none"></button>
+<button id="exitVR">✕ ออกจาก VR</button>
+<div id="vrDivider"></div>
 </body>
 </html>
