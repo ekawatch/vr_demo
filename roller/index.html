@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <!-- ป้องกันการซูมและเลื่อนหน้าจอเมื่อลากนิ้ว (สำคัญสำหรับมือถือ) -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>WebXR Roller Coaster</title>
+    <style>
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background: #000; 
+            font-family: sans-serif; 
+            touch-action: none; /* กันหน้าจอขยับตอนลากดูรอบๆ */
+        }
+        #ui-container { 
+            position: absolute; 
+            bottom: 20px; 
+            width: 100%; 
+            display: flex; 
+            justify-content: center; 
+            pointer-events: none; 
+            z-index: 999; 
+        }
+        #btn-stereo {
+            pointer-events: auto;
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 8px;
+            border: 2px solid white;
+            background: rgba(0, 123, 255, 0.8);
+            color: white;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            transition: 0.2s;
+        }
+        #btn-stereo:hover { background: rgba(0, 86, 179, 1); }
+        #crosshair {
+            position: absolute;
+            top: 50%; left: 50%;
+            width: 4px; height: 4px;
+            background: white;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 100;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <!-- จุดกึ่งกลางจอ ช่วยลดอาการวิงเวียนในโหมดปกติ -->
+    <div id="crosshair"></div>
+
+    <!-- ปุ่มสำหรับเปิดโหมดจอซ้าย/ขวา (Fallback) -->
+    <div id="ui-container">
+        <button id="btn-stereo">เปิดโหมด Split-Screen (มือถือแนวนอน)</button>
+    </div>
+    
+    <!-- นำเข้า Three.js ผ่าน CDN -->
+    <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+        // ==========================================
+        // 1. ตั้งค่า Scene พื้นฐาน
+        // ==========================================
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87ceeb); // สีฟ้าท้องฟ้า
+        scene.fog = new THREE.Fog(0x87ceeb, 50, 400); // หมอกเพื่อพรางวัตถุไกลๆ
+
+        // ==========================================
+        // 2. ตั้งค่า Camera และตัวผู้เล่น (Rig)
+        // ==========================================
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        
+        // Rig คือยาน/กระเช้าที่เคลื่อนที่ไปตามเส้น
+        const rig = new THREE.Group();
+        // Pivot คือจุดหมุนที่ให้ผู้เล่นหันกล้องไปมาอย่างอิสระ
+        const cameraPivot = new THREE.Group(); 
+        
+        cameraPivot.position.y = 1.5; // ยกกล้องให้อยู่เหนือราง (เหมือนนั่งอยู่)
+        rig.add(cameraPivot);
+        cameraPivot.add(camera);
+        scene.add(rig);
+
+        // ==========================================
+        // 3. ตั้งค่า Renderer & WebXR
+        // ==========================================
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.xr.enabled = true; // เปิดใช้งาน WebXR
+        document.body.appendChild(renderer.domElement);
+        
+        // เพิ่มปุ่ม WebXR มาตรฐาน
+        document.body.appendChild(VRButton.createButton(renderer));
+
+        // ==========================================
+        // 4. ตั้งค่าแสงสภาพแวดล้อม
+        // ==========================================
+        scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+        dirLight.position.set(100, 200, 50);
+        scene.add(dirLight);
+
+        // พื้นตารางให้เห็นความลึกและระยะทาง
+        const gridHelper = new THREE.GridHelper(1000, 200, 0x555555, 0xaaaaaa);
+        gridHelper.position.y = -30;
+        scene.add(gridHelper);
+
+        // ==========================================
+        // 5. สร้าง Parametric Sinusoidal Curve (เส้นทางรถไฟเหาะ)
+        // ==========================================
+        class RollerCoasterCurve extends THREE.Curve {
+            constructor() { super(); }
+            getPoint(t, optionalTarget = new THREE.Vector3()) {
+                // t คือความก้าวหน้าจาก 0 ถึง 1 (Loop ปิด)
+                const p = 2; // จำนวน Loop ในแกนระนาบ
+                const q = 3; // จำนวนการพับ/คลื่น
+                const angle = t * Math.PI * 2;
+                
+                // ใช้สมการ Parametric หมุนเป็นเกลียว (Lissajous/Knot)
+                const r = 40 + 20 * Math.cos(q * angle);
+                const x = r * Math.cos(p * angle);
+                const z = r * Math.sin(p * angle);
+                const y = 25 * Math.sin(q * angle); // ความสูงสลับขึ้นลง
+                
+                return optionalTarget.set(x, y, z);
+            }
+        }
+
+        const curve = new RollerCoasterCurve();
+        // สร้างท่อรอบๆ เส้นโค้ง (ทำเป็นรางเสมือน)
+        const tubeGeo = new THREE.TubeGeometry(curve, 400, 1, 8, true);
+        const tubeMat = new THREE.MeshStandardMaterial({ 
+            color: 0xff4400, 
+            wireframe: true // ทำให้ดูเหมือนโครงเหล็ก
+        });
+        const track = new THREE.Mesh(tubeGeo, tubeMat);
+        scene.add(track);
+
+        // คำนวณ Frenet Frames สำหรับหาเวกเตอร์ Tangent และ Normal อัตโนมัติ (กันตีลังกามั่ว)
+        const curveFrames = tubeGeo.parameters.path.computeFrenetFrames(400, true);
+
+        // สร้างกล่องสุ่มๆ รอบฉากเพื่อให้รู้สึกถึงความเร็วตอนเคลื่อนที่
+        for (let i = 0; i < 300; i++) {
+            const box = new THREE.Mesh(
+                new THREE.BoxGeometry(2, 2, 2),
+                new THREE.MeshStandardMaterial({ color: Math.random() * 0xffffff })
+            );
+            box.position.set(
+                (Math.random() - 0.5) * 300,
+                (Math.random() - 0.5) * 100,
+                (Math.random() - 0.5) * 300
+            );
+            scene.add(box);
+        }
+
+        // ==========================================
+        // 6. ระบบ Fallback Render หน้าจอซ้าย/ขวา
+        // ==========================================
+        let useStereo = false;
+        const stereoCamera = new THREE.StereoCamera();
+        stereoCamera.eyeSep = 0.064; // ระยะห่างระหว่างตา (IPD)
+        
+        const btnStereo = document.getElementById('btn-stereo');
+        btnStereo.addEventListener('click', () => {
+            useStereo = !useStereo;
+            if(useStereo) {
+                btnStereo.innerText = "ปิดโหมด Split-Screen";
+                document.getElementById('crosshair').style.display = 'none';
+            } else {
+                btnStereo.innerText = "เปิดโหมด Split-Screen (มือถือแนวนอน)";
+                document.getElementById('crosshair').style.display = 'block';
+                // ล้างค่า Scissor/Viewport
+                renderer.setScissorTest(false);
+                renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
+            }
+        });
+
+        // ==========================================
+        // 7. ระบบหันมุมกล้องแบบ Manual (ลากเมาส์ / ถูหน้าจอ)
+        // ==========================================
+        let isDragging = false;
+        let previousPosition = { x: 0, y: 0 };
+        let yaw = 0;
+        let pitch = 0;
+
+        const onPointerDown = (e) => { 
+            isDragging = true; 
+            previousPosition = { x: e.clientX, y: e.clientY };
+        };
+        const onPointerUp = () => { isDragging = false; };
+        const onPointerMove = (e) => {
+            // ห้ามควบคุมกล้องเองถ้าใช้ WebXR อยู่ เพราะหมวก VR จัดการให้แล้ว
+            if (isDragging && !renderer.xr.isPresenting) {
+                const deltaX = e.clientX - previousPosition.x;
+                const deltaY = e.clientY - previousPosition.y;
+                
+                yaw -= deltaX * 0.005;
+                pitch -= deltaY * 0.005;
+                
+                // ล็อกมุมเงย/ก้ม ไม่ให้คอหักเกิน 90 องศา
+                pitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, pitch));
+                cameraPivot.rotation.set(pitch, yaw, 0, 'YXZ');
+                
+                previousPosition = { x: e.clientX, y: e.clientY };
+            }
+        };
+
+        window.addEventListener('pointerdown', onPointerDown);
+        window.addEventListener('pointerup', onPointerUp);
+        window.addEventListener('pointermove', onPointerMove);
+
+        // จัดการเมื่อย่อ/ขยายหน้าจอ
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // ==========================================
+        // 8. ลูปแอนิเมชัน (Animation Loop)
+        // ==========================================
+        let progress = 0;
+        const speed = 0.0004; // ความเร็วรถไฟ
+
+        function render() {
+            // เลื่อนเปอร์เซ็นต์เส้นทาง
+            progress += speed;
+            if (progress > 1) progress = 0;
+
+            // ดึงตำแหน่ง(Position) และทิศทาง(Tangent) บนเส้นโค้ง
+            const pos = curve.getPointAt(progress);
+            const tangent = curve.getTangentAt(progress).normalize();
+            
+            // ใช้ Normal Vectors จาก Frenet Frames ให้เวกเตอร์ 'Up' ไม่หมุนคว้างผิดธรรมชาติ (Banking)
+            const index = Math.floor(progress * 400);
+            const normal = curveFrames.normals[index % 400]; 
+            
+            // ขยับยานพาหนะ
+            rig.position.copy(pos);
+            // ตั้งค่าแกน Up ให้เอนตามราง
+            rig.up.copy(normal);
+            // ให้ยานหันหน้าไปตามทิศทางการเคลื่อนที่
+            rig.lookAt(pos.clone().add(tangent));
+            
+            // วาดซีนลงหน้าจอ
+            if (renderer.xr.isPresenting) {
+                // โหมด WebXR ปกติ
+                renderer.render(scene, camera);
+            } else if (useStereo) {
+                // โหมด Fallback Split-Screen
+                stereoCamera.update(camera);
+                
+                const w = window.innerWidth;
+                const h = window.innerHeight;
+                
+                renderer.setScissorTest(true);
+                
+                // ตาซ้าย
+                renderer.setScissor(0, 0, w / 2, h);
+                renderer.setViewport(0, 0, w / 2, h);
+                renderer.render(scene, stereoCamera.cameraL);
+                
+                // ตาขวา
+                renderer.setScissor(w / 2, 0, w / 2, h);
+                renderer.setViewport(w / 2, 0, w / 2, h);
+                renderer.render(scene, stereoCamera.cameraR);
+                
+                renderer.setScissorTest(false);
+            } else {
+                // โหมดคอมพิวเตอร์/มือถือ 3D ธรรมดา
+                renderer.render(scene, camera);
+            }
+        }
+
+        renderer.setAnimationLoop(render);
+    </script>
+</body>
+</html>
