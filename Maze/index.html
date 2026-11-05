@@ -1,0 +1,773 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Version marker: 2026-11-03m (rewrite: walking_xr engine + maze scene) -->
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<link rel="icon" href="data:,">
+<title>Maze Walk — find the way out (WebXR + three.js)</title>
+<!-- ============================================================================
+  Maze Walk — WebXR walking through a random maze (three.js r169, vendored).
+
+  This file is a rewrite built on the VERIFIED walking_xr engine (same file
+  layout and the same proven functions for gaze-walk, collision stepping and
+  XR mode handling). Terrain / trees / sun were removed; the world content is
+  now a random maze (junctions, multiple routes, a beacon-lit EXIT).
+
+  ── Interaction: "look down ≈ 20° = walk" (bow-to-walk, per the assignment) ──
+    * ENGAGE = 20° — looking ~20° down from the horizon starts smooth walking
+      in the horizontal direction of the gaze (straight / left / right as the
+      user looks to the side).
+    * Speed: 0 at engage → maxSpeed at 48°, exponential smoothing (tau 0.12 s),
+      acceleration cap so there is no jolt.
+    * Bow beyond 70°: horizontal gaze is meaningless → keep the last heading.
+    * Collision: maze walls block, using a 0.42 m body circle vs wall AABBs.
+      Movement in 0.15 m substeps (advance()). Sliding along one axis works
+      for WASD (slideMove()).
+  ── Modes ────────────────────────────────────────────────────────────────────
+    * Same proven flow as walking_xr: probe immersive-vr → immersive-ar → flat.
+      The user taps the "เข้าโหมด VR/AR" button to start (browsers need a user
+      gesture for requestSession). In XR the player does NOT move the camera —
+      the world group is offset by (-px,0,-pz), so the maze floor stays exactly
+      at the real floor (local-floor reference space). AR passthrough: background off.
+      While an XR session is presenting, the DOM controls are hidden.
+    * Otherwise / on request: flat screen = FPS fallback — WASD walk, mouse
+      (pointer-lock) or touch-drag look, hold Space = try the same gaze-walk.
+    * First page (no url flags) shows NO text: only the back-to-index link and
+      the "เข้าโหมด VR/AR" button. The in-scene canvas-text signs (START /
+      EXIT) stay visible in XR; in flat mode they are hidden unless ?ui=1.
+  ── Maze ─────────────────────────────────────────────────────────────────────
+    * 15×15 cell grid: random DFS = perfect maze — exactly one route to the
+      exit; every junction branch is a dead end. ?seed=N reproduces a map.
+    * Exit = a real GAP through the outer wall + beacon + readable EXIT sign
+      outside it: you physically walk out to escape (confetti + "YOU ESCAPED!").
+  ── URL/debug hooks (headless verification) ──────────────────────────────────
+    ?seed=N         maze seed (absent = new random map)
+    ?pos=x,z        start player position (maze coords)
+    ?look=pitch,yaw degrees (flat look; NEGATIVE pitch = looking down)
+    ?walk=1         force gaze-walk in flat mode (screenshots/tests)
+    ?view=overview|goal   fixed test camera outside the player controls
+    ?ui=0           hide every DOM overlay, including the enter-VR button
+    ?ui=1           text overlay: help panel + HUD readout + WALK button +
+                    the in-scene START/EXIT signs (debug mode)
+    window.__app = { status(), setPlayer(x,z), setLook(pitch,yaw), probe(x,z), enterXR }
+============================================================================ -->
+<style>
+:root { --fg:#e8f4ff; --dim:#9fb3c8; --acc:#4cc9f0; --warn:#ffb347; --bg:#0b1220; }
+* { box-sizing:border-box; }
+html, body { margin:0; padding:0; background:var(--bg); color:var(--fg);
+  font-family: system-ui, "Segoe UI", Verdana, sans-serif; line-height:1.5;
+  height:100%; overflow:hidden; touch-action:none; -webkit-user-select:none; user-select:none; }
+#hud { position:fixed; left:0; bottom:0; z-index:10; width:min(64vw,520px);
+  background:#0b1220dd; border-top:1px solid #22384d; padding:8px 12px; font-size:13px; }
+#readout { font-family: ui-monospace, "DejaVu Sans Mono", monospace; font-size:12px;
+  white-space:pre; margin:6px 0 0; }
+#help { position:fixed; left:0; top:0; z-index:10; max-width:520px;
+  background:#0b1220dd; border-bottom:1px solid #22384d; padding:10px 14px; font-size:13px; }
+#help h1 { font-size:16px; color:var(--acc); margin:0 0 4px; }
+.warn { color:var(--warn); }
+.win { color:#7dffa8; font-weight:bold; }
+/* unified first-page UI (same position in all 5 media) */
+#backIdx { position:fixed; left:14px; top:14px; z-index:40;
+  font:600 14px/1.2 system-ui,"Noto Sans Thai",sans-serif; padding:9px 14px;
+  border:1px solid #4cc9f0; background:#0b1220cc; color:#e8f4ff; border-radius:8px; text-decoration:none; }
+#enterXR, #xrBtn { position:fixed; left:14px; bottom:14px; z-index:40;
+  font:600 16px/1.2 system-ui,"Noto Sans Thai",sans-serif; padding:10px 18px;
+  border:1px solid #4cc9f0; background:#12314a; color:#e8f4ff; border-radius:8px; cursor:pointer; }
+#walkBtn { margin-top:8px; margin-left:8px; font-size:14px; padding:8px 14px;
+  border:1px solid #7dffa8; background:#173a24; color:var(--fg); border-radius:6px; cursor:pointer; }
+canvas { position:fixed; inset:0; display:block; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ============ Section 1 — math only (walking_xr engine + maze generator) ==== */
+const RAD = Math.PI / 180;
+const params = new URLSearchParams(location.search);
+const UI_ON = params.get('ui') !== '0';
+const TEXT_UI = params.get('ui') === '1';   /* ?ui=1 = the text/debug overlay */
+const FORCE_WALK = params.get('walk') === '1';
+const VIEW_MODE = params.get('view');               /* 'overview' | 'goal' | null */
+const seedRaw = params.get('seed');
+const SEED = seedRaw !== null && isFinite(Number(seedRaw))
+  ? Number(seedRaw) >>> 0
+  : (Date.now() ^ 0x9e3779b9) >>> 0;
+
+function mulberry32 (seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), 1 | t);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* ---- maze generation: 15×15 grid, random DFS (PERFECT maze) ------------------
+   MAP is a character grid: '#' wall block, '.' corridor, S start, E exit.
+   Cell (x,z) occupies the world AABB [x*CELL,(x+1)*CELL] × [z*CELL,(z+1)*CELL].
+   A pure DFS carving is a spanning tree: exactly ONE route exists between any
+   two cells → the way out is unique and every junction branch dead-ends.
+   The east outer-wall cell of the goal row is opened = exit gate: the player
+   physically walks out through the gap in the wall to the beacon outside. */
+const MW = 15, MH = 15, CELL = 2, WALLH = 3;
+const rng = mulberry32(SEED);
+const grid = Array.from({ length: MH }, () => Array(MW).fill('#'));
+const DIRS = [[0, -2], [2, 0], [0, 2], [-2, 0]];
+{
+  const stack = [[1, 1]];
+  grid[1][1] = '.';
+  while (stack.length) {
+    const [cx, cz] = stack[stack.length - 1];
+    const opts = DIRS.map(([dx, dz]) => [cx + dx, cz + dz, dx, dz])
+      .filter(([nx, nz]) => nx > 0 && nz > 0 && nx < MW - 1 && nz < MH - 1 && grid[nz][nx] === '#');
+    if (opts.length) {
+      const [nx, nz, dx, dz] = opts[(rng() * opts.length) | 0];
+      grid[cz + dz / 2][cx + dx / 2] = '.';
+      grid[nz][nx] = '.';
+      stack.push([nx, nz]);
+    } else stack.pop();
+  }
+  grid[MH - 2][MW - 1] = '.';   /* exit gate: gap straight through the wall */
+}
+const MAP = grid.map((row, z) => row.map((ch, x) =>
+  (x === 1 && z === 1) ? 'S' : (x === MW - 2 && z === MH - 2) ? 'E' : ch).join(''));
+const COLS = MAP[0].length, ROWS = MAP.length;
+const isWall = (cx, cz) => {
+  /* inside the grid: walls are '#'; outside the grid is open ground — the ONLY
+     way to get there is through the exit gate (boundary cells stay '#') */
+  if (cx < 0 || cz < 0 || cx >= COLS || cz >= ROWS) return false;
+  return MAP[cz][cx] === '#';
+};
+const cellCenter = (c) => [(c[0] + 0.5) * CELL, (c[1] + 0.5) * CELL];
+const startPos = cellCenter([1, 1]);
+const goalCell = cellCenter([COLS - 2, ROWS - 2]);
+/* beacon stands just OUTSIDE the exit gate, 1.5 m past the outer wall */
+const goalPos = [COLS * CELL + 1.5, goalCell[1]];
+/* first open neighbour of the start cell: spawn facing + START sign placement */
+const startDir = (() => {
+  for (const [dx, dz] of DIRS) if (!isWall(1 + dx / 2, 1 + dz / 2)) return [dx, dz];
+  return [0, 2];
+})();
+
+const state = {
+  seed: SEED,
+  px: startPos[0], pz: startPos[1],
+  lastHeading: { x: startDir[0], z: startDir[1] },
+  speed: 0, bow: 0, pathLen: 0, blockedMsg: '',
+  yaw: Math.atan2(-startDir[0], -startDir[1]) / RAD, pitch: 0,   /* flat look (deg) */
+  mode: 'flat', won: false
+};
+{
+  const pPos = params.get('pos');
+  if (pPos) {
+    const [x, z] = pPos.split(',').map(Number);
+    if (isFinite(x) && isFinite(z)) { state.px = x; state.pz = z; }
+  }
+  const pLook = params.get('look');
+  if (pLook) {
+    const [pitch, yaw] = pLook.split(',').map(Number);
+    if (isFinite(pitch) && isFinite(yaw)) { state.pitch = pitch; state.yaw = yaw; }
+  }
+}
+
+/* ---- walk config (verbatim from the verified walking_xr engine) -------------
+   engage 20° per the assignment; deeper look → faster, capped, smoothed. */
+const WALK = {
+  engage: 20, full: 48, maxSpeed: 2.3, maxAccel: 5.0, smoothTau: 0.12,
+  bodyRadius: 0.42, ambiguousBow: 70
+};
+function bowRamp (bowDeg) {
+  return Math.max(0, Math.min(1, (bowDeg - WALK.engage) / (WALK.full - WALK.engage)));
+}
+function targetSpeed (bowDeg) { return WALK.maxSpeed * bowRamp(bowDeg); }
+function smoothSpeed (current, target, dt) {
+  const k = 1 - Math.exp(-dt / WALK.smoothTau);
+  let next = current + (target - current) * k;
+  const delta = next - current, lim = WALK.maxAccel * dt;
+  if (Math.abs(delta) > lim) next = current + Math.sign(delta) * lim;
+  return Math.max(0, next);
+}
+function headingFrom (fx, fz, bowDeg) {
+  const m = Math.hypot(fx, fz);
+  if (bowDeg > WALK.ambiguousBow || m < 0.12)
+    return { x: state.lastHeading.x, z: state.lastHeading.z, fallback: true };
+  return { x: fx / m, z: fz / m, fallback: false };
+}
+
+/* ---- collision: body circle (r 0.42) vs nearby wall-cell AABBs ------------ */
+function canOccupy (x, z) {
+  const r = WALK.bodyRadius;
+  const x0 = Math.floor((x - r) / CELL), x1 = Math.floor((x + r) / CELL);
+  const z0 = Math.floor((z - r) / CELL), z1 = Math.floor((z + r) / CELL);
+  for (let cz = z0; cz <= z1; cz++) for (let cx = x0; cx <= x1; cx++) {
+    if (!isWall(cx, cz)) continue;
+    const minX = cx * CELL, minZ = cz * CELL;
+    const qx = Math.max(minX, Math.min(x, minX + CELL)), qz = Math.max(minZ, Math.min(z, minZ + CELL));
+    const dx = x - qx, dz = z - qz;
+    if (dx * dx + dz * dz < r * r) return { ok: false, reason: 'WALL' };
+  }
+  return { ok: true };
+}
+function advance (heading, distance) {
+  let x = state.px, z = state.pz, moved = 0, blocked = null;
+  while (moved < distance - 1e-9) {
+    const d = Math.min(0.15, distance - moved);
+    const nx = x + heading.x * d, nz = z + heading.z * d;
+    const c = canOccupy(nx, nz);
+    if (!c.ok) { blocked = c.reason; break; }
+    x = nx; z = nz; moved += d;
+  }
+  return { x, z, moved, blocked };
+}
+function slideMove (dx, dz) {
+  /* FPS movement: advance, sliding along one axis when the diagonal is blocked */
+  let moved = 0;
+  const steps = Math.max(1, Math.ceil(Math.hypot(dx, dz) / 0.15));
+  for (let i = 0; i < steps; i++) {
+    const sx = dx / steps, sz = dz / steps;
+    if (canOccupy(state.px + sx, state.pz + sz).ok) { state.px += sx; state.pz += sz; moved += Math.hypot(sx, sz); continue; }
+    if (canOccupy(state.px + sx, state.pz).ok) { state.px += sx; moved += Math.abs(sx); continue; }
+    if (canOccupy(state.px, state.pz + sz).ok) { state.pz += sz; moved += Math.abs(sz); continue; }
+    break;
+  }
+  return moved;
+}
+
+/* ============ Section 2 — three.js scene (the maze) ======================== */
+const scene = new THREE.Scene();
+const skyColor = new THREE.Color('#b6cfe4');
+scene.background = skyColor;
+scene.fog = new THREE.Fog('#c2d3e2', 26, 150);
+
+/* normal lens (not the wide mountain lens): corridors are 2 m wide */
+const VIEW_FOV = 72;
+const camera = new THREE.PerspectiveCamera(VIEW_FOV, 1, 0.05, 400);
+camera.rotation.order = 'YXZ';
+camera.position.set(0, 1.6, 0);
+scene.add(camera);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+renderer.xr.enabled = true;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+scene.add(new THREE.HemisphereLight('#c8dcec', '#44543c', 0.85));
+const keyLight = new THREE.DirectionalLight('#fff3d6', 1.35);
+keyLight.castShadow = true;
+keyLight.shadow.mapSize.set(1024, 1024);
+Object.assign(keyLight.shadow.camera, { left: -36, right: 36, top: 36, bottom: -36, near: 1, far: 140 });
+keyLight.shadow.camera.updateProjectionMatrix();
+keyLight.shadow.bias = -0.0006;
+keyLight.shadow.normalBias = 0.03;
+keyLight.position.set(30, 44, 14);
+
+/* world group: the player stays at the XR origin — this group is offset by
+   (-px,0,-pz) so the maze floor always sits at the real floor level
+   (the proven walking_xr mechanism; it is what makes XR reliably render) */
+const world = new THREE.Group();
+scene.add(world);
+world.add(keyLight);
+keyLight.target.position.set(0, 0, 0);
+world.add(keyLight.target);
+
+/* ---- procedural textures (no external assets) ---- */
+function canvasTex(w, h, painter, repeat = [1, 1]) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  painter(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(repeat[0], repeat[1]);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+const brickTex = canvasTex(512, 512, (g, w, h) => {
+  let rnd = 7;
+  const R = () => (rnd = (rnd * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  g.fillStyle = '#b9a89a'; g.fillRect(0, 0, w, h);
+  const bh = 64, bw = 128;
+  for (let row = 0; row * bh < h; row++) {
+    const off = (row % 2) * bw / 2;
+    for (let bx = -bw; bx < w + bw; bx += bw) {
+      const v = 0.9 + R() * 0.2;
+      g.fillStyle = `rgb(${(176 * v) | 0},${(156 * v) | 0},${(136 * v) | 0})`;
+      g.fillRect(bx + off + 2, row * bh + 2, bw - 4, bh - 4);
+    }
+  }
+  for (let i = 0; i < 2600; i++) {
+    g.fillStyle = `rgba(60,50,44,${R() * 0.05})`;
+    g.fillRect(R() * w, R() * h, 2 + R() * 4, 2 + R() * 4);
+  }
+}, [2, 1.4]);
+const floorTex = canvasTex(512, 512, (g, w, h) => {
+  let rnd = 99;
+  const R = () => (rnd = (rnd * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  g.fillStyle = '#4f5a60'; g.fillRect(0, 0, w, h);
+  const ts = 128;
+  for (let ty = 0; ty < h; ty += ts) for (let tx = 0; tx < w; tx += ts) {
+    const v = 0.92 + R() * 0.18;
+    g.fillStyle = `rgb(${(96 * v) | 0},${(104 * v) | 0},${(112 * v) | 0})`;
+    g.fillRect(tx + 3, ty + 3, ts - 6, ts - 6);
+  }
+  for (let i = 0; i < 2200; i++) {
+    g.fillStyle = `rgba(25,28,32,${R() * 0.06})`;
+    g.fillRect(R() * w, R() * h, 1 + R() * 3, 2 + R() * 3);
+  }
+}, [COLS * CELL / 2, ROWS * CELL / 2]);
+
+/* ---- maze geometry ---- */
+{
+  let wallCount = 0;
+  for (let z = 0; z < ROWS; z++) for (let x = 0; x < COLS; x++) if (MAP[z][x] === '#') wallCount++;
+  const walls = new THREE.InstancedMesh(new THREE.BoxGeometry(CELL, WALLH, CELL),
+    new THREE.MeshStandardMaterial({ map: brickTex, roughness: 0.92, metalness: 0 }), wallCount);
+  walls.castShadow = true; walls.receiveShadow = true;
+  const m = new THREE.Matrix4();
+  let i = 0;
+  for (let z = 0; z < ROWS; z++) for (let x = 0; x < COLS; x++) if (MAP[z][x] === '#') {
+    m.makeTranslation((x + 0.5) * CELL, WALLH / 2, (z + 0.5) * CELL);
+    walls.setMatrixAt(i++, m);
+  }
+  walls.instanceMatrix.needsUpdate = true;
+  world.add(walls);
+
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(COLS * CELL, ROWS * CELL),
+    new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.9 }));
+  floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true;
+  floor.position.set((COLS * CELL) / 2, 0.005, (ROWS * CELL) / 2);
+  world.add(floor);
+
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(300, 300),
+    new THREE.MeshStandardMaterial({ color: '#39463d', roughness: 1 }));
+  ground.rotation.x = -Math.PI / 2; ground.position.set((COLS * CELL) / 2, 0, (ROWS * CELL) / 2);
+  world.add(ground);
+}
+
+/* ---- exit beacon: visible over the walls from anywhere in the maze ---- */
+const beaconGroup = new THREE.Group();
+beaconGroup.position.set(goalPos[0], 0, goalPos[1]);
+{
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.55, 15, 28),
+    new THREE.MeshBasicMaterial({ color: '#ffb347', transparent: true, opacity: 0.34,
+      fog: false, blending: THREE.AdditiveBlending, depthWrite: false }));
+  beam.position.y = 7.5; beaconGroup.add(beam);
+  const core = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 15, 16),
+    new THREE.MeshBasicMaterial({ color: '#ffd98a', fog: false }));
+  core.position.y = 7.5; beaconGroup.add(core);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.85, 0.09, 12, 40),
+    new THREE.MeshBasicMaterial({ color: '#ffb347', fog: false }));
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.07; beaconGroup.add(ring);
+  const beaconLight = new THREE.PointLight('#ffc060', 8, 20, 1.6);
+  beaconLight.position.y = 3.5; beaconGroup.add(beaconLight);
+}
+world.add(beaconGroup);
+
+/* ---- canvas-text signs (shared draw helper; EXIT redraws on win) ---- */
+function panelMesh(w, h, drawFn) {
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+    new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, fog: false }));
+  mesh.scale.set(w / 320, h / 320, 1);
+  const redraw = (texts, fg, bg) => {
+    drawFn(cv.getContext('2d'), w, h, texts, fg, bg);
+    tex.needsUpdate = true;
+  };
+  return { mesh, redraw };
+}
+const paintPanel = (g, w, h, texts, fg, bg) => {
+  g.fillStyle = bg; g.fillRect(0, 0, w, h);
+  g.strokeStyle = fg; g.lineWidth = 10; g.strokeRect(12, 12, w - 24, h - 24);
+  g.textAlign = 'center'; g.fillStyle = fg;
+  const size = Math.min(88, (w * 0.8) / Math.max(...texts.map(t => Math.max(4, t.length * 0.62))));
+  g.font = `bold ${size}px system-ui,'Segoe UI',Verdana,sans-serif`;
+  texts.forEach((t, i) => g.fillText(t, w / 2, h * (0.26 + 0.5 * (i / Math.max(1, texts.length - 1)))));
+};
+const exitSign = panelMesh(1024, 384, paintPanel);
+exitSign.redraw(['EXIT = the way out', 'walk through the gap'], '#ffd98a', '#1b2430');
+/* The gate gap is grid cell (14,13): world x 28..30, z 26..28 (goal corridor
+   row). The panel hangs in the gap, on its north side wall (face z=26), at
+   eye level, readable south toward the walking line (readable normal =
+   (sin θ, 0, cos θ), θ=0 → +z). The twin panel is mounted on the OUTSIDE
+   face of the outer wall facing east — readable from the open ground after
+   you escape. Both share one canvas: one redraw updates both. */
+exitSign.mesh.position.set(29, 1.8, 26.04);
+exitSign.mesh.rotation.y = 0;
+world.add(exitSign.mesh);
+const exitSignOut = new THREE.Mesh(exitSign.mesh.geometry, exitSign.mesh.material);
+exitSignOut.scale.copy(exitSign.mesh.scale);
+exitSignOut.position.set(30.04, 1.8, 24.6);
+exitSignOut.rotation.y = Math.PI / 2;
+world.add(exitSignOut);
+
+const startSign = panelMesh(1024, 320, paintPanel);
+startSign.redraw(['START', 'LOOK DOWN ~20° TO WALK'], '#cde9ff', '#10161f');
+/* mounted on the wall behind the player: never blocks the forward view */
+startSign.mesh.position.set(startPos[0] - startDir[0] * 0.45, 1.5, startPos[1] - startDir[1] * 0.45);
+startSign.mesh.rotation.y = Math.atan2(startDir[0], startDir[1]);
+world.add(startSign.mesh);
+
+/* ---- win confetti (world coords, at the goal) ---- */
+const CONF = 240;
+const confGeo = new THREE.BufferGeometry();
+const confPos = new Float32Array(CONF * 3), confCol = new Float32Array(CONF * 3), confVel = new Float32Array(CONF * 3);
+const palette = ['#ff5d5d', '#5dd75d', '#5d8dff', '#ffd75d', '#ff8dd7'].map(s => new THREE.Color(s));
+for (let i = 0; i < CONF; i++) {
+  confPos[i * 3] = (Math.random() - 0.5) * 3; confPos[i * 3 + 1] = 3 + Math.random() * 4; confPos[i * 3 + 2] = (Math.random() - 0.5) * 3;
+  const col = palette[i % palette.length]; confCol[i * 3] = col.r; confCol[i * 3 + 1] = col.g; confCol[i * 3 + 2] = col.b;
+  confVel[i * 3] = (Math.random() - 0.5) * 1.4; confVel[i * 3 + 1] = 1.6 + Math.random() * 1.6; confVel[i * 3 + 2] = (Math.random() - 0.5) * 1.4;
+}
+confGeo.setAttribute('position', new THREE.BufferAttribute(confPos, 3));
+confGeo.setAttribute('color', new THREE.BufferAttribute(confCol, 3));
+const confetti = new THREE.Points(confGeo, new THREE.PointsMaterial({ size: 0.08, vertexColors: true, fog: false }));
+confetti.position.set(goalPos[0], 0, goalPos[1]);
+confetti.visible = false;
+world.add(confetti);
+
+/* ---- walking-status ring: appears on the floor where the gaze lands while
+   the bow reaches the engage angle = the symbol that the user is walking ---- */
+const gazeRing = new THREE.Mesh(
+  new THREE.RingGeometry(0.34, 0.46, 48),
+  new THREE.MeshBasicMaterial({ color: '#8a9a6a', transparent: true, opacity: 0.5,
+    side: THREE.DoubleSide, depthWrite: false, depthTest: false }));
+gazeRing.rotation.x = -Math.PI / 2;
+gazeRing.visible = false;
+scene.add(gazeRing);   /* NOT in world: positioned in world coordinates directly */
+
+/* ============ Section 3 — modes: XR (VR→AR) or flat FPS ==================== */
+function gazeCamera () {
+  return (renderer.xr.isPresenting) ? renderer.xr.getCamera() : camera;
+}
+const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3();
+function gazeRayHit () {
+  const cam = gazeCamera();
+  const o = cam.getWorldPosition(_v1);
+  const g = cam.getWorldDirection(_v2);            /* unit forward, world coords */
+  const bow = Math.asin(-Math.max(-1, Math.min(1, g.y))) / RAD;
+  state.bow = bow;
+  let hit = null;
+  if (g.y < -0.02 && o.y > 0.02) {                /* hit the floor plane y=0 */
+    const t = o.y / -g.y;
+    if (t < 40) hit = { x: o.x + g.x * t, y: 0, z: o.z + g.z * t };
+  }
+  return { hit, bow, gaze: g };
+}
+
+/* XR: probe first, enter only on the user's tap (user-gesture rule).
+   Proven walking_xr flow: prefer immersive-vr, fall back to immersive-ar. */
+let xrKind = null;
+async function probeXR () {
+  if (!navigator.xr) return;
+  try {
+    if (await navigator.xr.isSessionSupported('immersive-vr')) xrKind = 'immersive-vr';
+    else if (await navigator.xr.isSessionSupported('immersive-ar')) xrKind = 'immersive-ar';
+  } catch (_) { xrKind = null; }
+}
+async function enterXR () {
+  if (!xrKind) return false;
+  try { if (document.pointerLockElement) document.exitPointerLock(); } catch (_) {}
+  let session = null;
+  try {
+    session = await navigator.xr.requestSession(xrKind, {
+      optionalFeatures: ['local-floor', 'local'] });
+  } catch (_) {
+    state.mode = 'flat';
+    const btn = document.getElementById('xrBtn');
+    if (btn) btn.textContent = '⚠ ' + xrKind + ' refused — tap to try again';
+    return false;
+  }
+  let ok = false;
+  for (const space of ['local-floor', 'local']) {
+    try {
+      renderer.xr.setReferenceSpaceType(space);
+      await renderer.xr.setSession(session);
+      ok = true; break;
+    } catch (_) {
+      /* reset three.js XR state before trying the safer reference space */
+      try { await renderer.xr.setSession(null); } catch (_) { /* nothing set yet */ }
+    }
+  }
+  if (!ok) {
+    try { await session.end(); } catch (_) {}
+    state.mode = 'flat';
+    const btn = document.getElementById('xrBtn');
+    if (btn) btn.textContent = '⚠ XR could not start on this device — try Chrome';
+    return false;
+  }
+  state.mode = xrKind === 'immersive-vr' ? 'vr' : 'ar';
+  if (state.mode === 'ar' && session.environmentBlendMode && session.environmentBlendMode !== 'opaque')
+    scene.background = null;                       /* passthrough: show the real room */
+  const btn = document.getElementById('xrBtn');
+  if (btn) btn.style.display = 'none';
+  session.addEventListener('end', () => {
+    state.mode = 'flat';
+    scene.background = skyColor;
+    state.speed = 0;
+    if (btn) { btn.style.display = 'inline-block'; btn.textContent = xrBtnLabel(xrKind); }
+  });
+  return true;
+}
+function xrBtnLabel (kind) { return kind === 'immersive-vr' ? 'เข้าโหมด VR' : 'เข้าโหมด AR'; }
+
+/* flat-mode input: pointer-lock mouse look (desktop) + touch drag, WASD walk,
+   hold Space = try the same gaze-walk the headset uses */
+const keys = {};
+let locked = false, dragging = false, lastT = null;
+const lookSens = 0.126;   /* deg per pixel (pointer-lock mouse) */
+window.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === ' ') keys.space = true;
+  else if ('wasd'.includes(k)) keys[k] = true;
+  else return;
+  e.preventDefault();
+});
+window.addEventListener('keyup', e => {
+  const k = e.key.toLowerCase();
+  if (k === ' ') keys.space = false;
+  else if ('wasd'.includes(k)) delete keys[k];
+});
+renderer.domElement.addEventListener('click', e => {
+  if (renderer.xr.isPresenting || locked) return;
+  if (e.pointerType === 'touch') return;           /* phones use drag + WALK/STOP */
+  try { renderer.domElement.requestPointerLock(); } catch (_) {}
+});
+document.addEventListener('pointerlockchange', () => {
+  locked = document.pointerLockElement === renderer.domElement;
+});
+window.addEventListener('mousemove', e => {
+  if (!locked && !dragging) return;
+  flatLook(-e.movementX * lookSens, -e.movementY * lookSens);
+});
+renderer.domElement.addEventListener('pointerdown', e => { dragging = true; lastT = [e.clientX, e.clientY]; });
+window.addEventListener('pointerup', () => { dragging = false; lastT = null; });
+window.addEventListener('pointermove', e => {
+  if (locked || !dragging) return;
+  if (e.pointerType === 'mouse') return;           /* mouse handled above */
+  flatLook(-(e.clientX - lastT[0]) * 0.23, -(e.clientY - lastT[1]) * 0.23);
+  lastT = [e.clientX, e.clientY];
+});
+/* state.yaw / state.pitch are DEGREES (yaw wrapped); converted at every use */
+function flatLook (dyawDeg, dpitchDeg) {
+  state.yaw = ((state.yaw + dyawDeg + 180) % 360 + 360) % 360 - 180;
+  state.pitch = Math.max(-85, Math.min(85, state.pitch + dpitchDeg));
+  camera.rotation.set(state.pitch * RAD, state.yaw * RAD, 0);
+}
+camera.rotation.set(state.pitch * RAD, state.yaw * RAD, 0);   /* apply start/?look orientation */
+
+/* touch devices get a WALK/STOP toggle = "hold Space" for phones */
+function isTouchDevice () {
+  return (navigator.maxTouchPoints || 0) > 0 || matchMedia('(pointer: coarse)').matches;
+}
+
+/* test-only fixed camera (?view=overview|goal) — overrides controls */
+const VIEW_PRESET = (() => {
+  if (VIEW_MODE === 'overview') return { vx: (COLS * CELL) / 2, vz: (ROWS * CELL) / 2, y: 34, pitch: -82, yaw: 0 };
+  if (VIEW_MODE === 'goal') {
+    /* stand in the goal cell looking east through the exit gap: gate sign +
+       beacon outside must both be in frame */
+    return { vx: goalCell[0] - 0.8, vz: goalCell[1], y: 1.7, pitch: 0, yaw: -90 };
+  }
+  return null;
+})();
+
+/* ---- one loop for every mode (identical structure to walking_xr) ---- */
+/* DOM controls (created later in this module; assigned only when the url flags
+   allow them) — used by tick() to hide everything while an XR session presents */
+let backIdxEl = null, xrBtnEl = null, walkBtnEl = null;
+
+/* setAnimationLoop passes an ABSOLUTE timestamp (rAF time), so dt is ours */
+let prevTime = null;
+function tick (tMs) {
+  const nowMs = (typeof tMs === 'number' && isFinite(tMs)) ? tMs : performance.now();
+  const dt = prevTime === null ? 0.016 : Math.min(0.05, Math.max(0.001, (nowMs - prevTime) / 1000));
+  prevTime = nowMs;
+  const presenting = renderer.xr.isPresenting;
+
+  /* unified first-page UI: while an XR session is presenting, the DOM controls
+     (back-to-index link, enter-VR button, WALK button) are hidden */
+  if (backIdxEl) backIdxEl.style.display = presenting ? 'none' : 'block';
+  if (xrBtnEl) xrBtnEl.style.display = presenting ? 'none' : 'inline-block';
+  if (walkBtnEl) walkBtnEl.style.display = presenting ? 'none' : 'inline-block';
+
+  /* in-scene text (canvas-text signs): kept in XR, hidden in flat mode unless ?ui=1 */
+  const showSigns = presenting || TEXT_UI;
+  exitSign.mesh.visible = showSigns; exitSignOut.visible = showSigns; startSign.mesh.visible = showSigns;
+
+  /* flat camera always mirrors the look state (XR owns its own camera) */
+  if (!presenting && !VIEW_PRESET) camera.rotation.set(state.pitch * RAD, state.yaw * RAD, 0);
+
+  const R = gazeRayHit();
+  if (!VIEW_PRESET && R.hit && R.bow >= WALK.engage) { gazeRing.position.set(R.hit.x, R.hit.y + 0.02, R.hit.z); gazeRing.visible = true; }
+  else gazeRing.visible = false;
+
+  const walking = presenting || (state.mode === 'flat' && (keys.space || FORCE_WALK || walkToggle));
+  if (walking) {
+    /* look-to-walk: speed from bow depth, heading from gaze yaw */
+    state.speed = smoothSpeed(state.speed, targetSpeed(R.bow), dt);
+    if (state.speed > 0.005) {
+      const h = headingFrom(R.gaze.x, R.gaze.z, R.bow);
+      state.lastHeading = { x: h.x, z: h.z };
+      const adv = advance(h, state.speed * dt);
+      state.pathLen += adv.moved;
+      state.px = adv.x; state.pz = adv.z;
+      if (adv.blocked) state.blockedMsg = adv.blocked;
+      else if (state.blockedMsg) state.blockedMsg = '';
+    }
+  } else if (state.mode === 'flat') {
+    /* FPS fallback: WASD relative to the view yaw */
+    state.speed = 0;
+    const fw = (keys.w ? 1 : 0) - (keys.s ? 1 : 0);
+    const st = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
+    if (fw || st) {
+      const spd = WALK.maxSpeed;
+      const fy = state.yaw * RAD;
+      const fx = -Math.sin(fy), fz = -Math.cos(fy);  /* view forward */
+      const rx =  Math.cos(fy), rz = -Math.sin(fy);  /* view right  */
+      const m = Math.hypot(fw, st);
+      const moved = slideMove((fx * fw + rx * st) / m * spd * dt, (fz * fw + rz * st) / m * spd * dt);
+      state.pathLen += moved;
+      if (moved > 0) state.lastHeading = { x: fx * Math.sign(fw) + rx * Math.sign(st), z: fz * Math.sign(fw) + rz * Math.sign(st) };
+    }
+  }
+
+  /* win check: inside the exit cell (near the beacon axis) */
+  const goalDist = Math.hypot(state.px - goalPos[0], state.pz - goalPos[1]);
+  if (!state.won && goalDist < 1.1) {
+    state.won = true;
+    /* the two sign panels share one canvas texture: one redraw updates both */
+    exitSign.redraw(['YOU ESCAPED!'], '#7dffa8', '#10241a');
+    confetti.visible = true;
+  }
+  if (state.won) {
+    const pos = confGeo.attributes.position.array;
+    for (let i = 0; i < CONF; i++) {
+      pos[i * 3] += confVel[i * 3] * dt;
+      pos[i * 3 + 1] += confVel[i * 3 + 1] * dt;
+      pos[i * 3 + 2] += confVel[i * 3 + 2] * dt;
+      confVel[i * 3 + 1] -= 2.2 * dt;             /* gravity */
+      if (pos[i * 3 + 1] < 0.05) pos[i * 3 + 1] = 0.05;
+    }
+    confGeo.attributes.position.needsUpdate = true;
+  }
+
+  /* the player stands at the origin; the maze is offset under them */
+  if (VIEW_PRESET) {
+    world.position.set(-VIEW_PRESET.vx, 0, -VIEW_PRESET.vz);
+    camera.position.y = VIEW_PRESET.y;
+    camera.rotation.set(VIEW_PRESET.pitch * RAD, VIEW_PRESET.yaw * RAD, 0);
+  } else {
+    world.position.set(-state.px, 0, -state.pz);
+  }
+
+  if (TEXT_UI && !presenting) {
+    readoutEl.textContent = [
+      'mode : ' + state.mode + (state.blockedMsg ? '  ' + state.blockedMsg : ''),
+      'pos  : ' + state.px.toFixed(2) + ', ' + state.pz.toFixed(2) +
+        '   exit ' + goalDist.toFixed(1) + ' m away',
+      'speed: ' + state.speed.toFixed(2) + ' m/s   gaze-bow ' + Math.round(state.bow) + '°   path ' + state.pathLen.toFixed(1) + ' m',
+      'seed : ' + state.seed + (state.won ? '   🎉 YOU ESCAPED THE MAZE!' : ''),
+    ].join('\n');
+  }
+
+  /* draw the frame (during an XR session the XR camera owns the view) */
+  renderer.render(scene, presenting ? renderer.xr.getCamera() : camera);
+}
+
+/* text overlay (only with ?ui=1): help panel + HUD readout + WALK button.
+   Default first page: NO text — only the back-to-index link + enter-VR button. */
+if (UI_ON) {
+  const a = document.createElement('a');
+  a.id = 'backIdx';
+  a.href = '../index.html';
+  a.textContent = '← index';
+  document.body.appendChild(a);
+  backIdxEl = a;
+}
+
+const helpEl = document.createElement('div');
+helpEl.id = 'help';
+helpEl.innerHTML =
+  '<h1>Maze Walk — find the way out (WebXR)</h1>' +
+  'In VR/AR: <b>look down about 20° from the horizon</b> and you walk smoothly toward where you look ' +
+  '(straight, left or right). Look deeper = walk faster. Look up = stop.' + '<br>' +
+  'The maze has random junctions but <b>only one route leads out</b> — the rest ' +
+  'are dead ends; a new map is drawn on each load ' +
+  '(same map again: add <b>?seed=N</b> to the URL).' + '<br>' +
+  'The exit is a <b>gap in the wall</b>: walk through it out to the beacon to escape.' + '<br>' +
+  'This screen (no XR): <b>WASD</b> walk, mouse or finger drag = look around, ' +
+  '<b>hold Space</b> = try the same gaze-walk.' + '<br>' +
+  '<span class="warn">Safety: clear an area ≥2×2 m or stay seated. Stop when dizzy.</span>';
+if (TEXT_UI) document.body.appendChild(helpEl);
+
+const hudEl = document.createElement('div');
+hudEl.id = 'hud';
+const readoutEl = document.createElement('pre');
+readoutEl.id = 'readout';
+hudEl.appendChild(readoutEl);
+if (TEXT_UI) document.body.appendChild(hudEl);
+
+let walkToggle = false;
+function addWalkBtn () {
+  if (!TEXT_UI) return;
+  const b = document.createElement('button');
+  b.id = 'walkBtn';
+  b.textContent = 'WALK';
+  b.addEventListener('click', () => {
+    walkToggle = !walkToggle;
+    b.textContent = walkToggle ? 'STOP' : 'WALK';
+  });
+  hudEl.appendChild(b);
+  walkBtnEl = b;
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* debug hooks for headless verification */
+window.__app = {
+  status () {
+    const dist = Math.hypot(state.px - goalPos[0], state.pz - goalPos[1]);
+    return { mode: state.mode, px: state.px, pz: state.pz, speed: state.speed,
+             bow: state.bow, path: state.pathLen, heading: state.lastHeading,
+             look: { pitch: state.pitch, yaw: state.yaw },
+             blocked: state.blockedMsg, won: state.won, goalDist: dist,
+             seed: state.seed, map: MAP, startPos, goalPos, startDir,
+             walls: MAP.join('').split('#').length - 1, ring: gazeRing.visible,
+             presenting: renderer.xr.isPresenting, xrKind };
+  },
+  setPlayer (x, z) { state.px = x; state.pz = z; },
+  setLook (pitchDeg, yawDeg) { state.pitch = pitchDeg; state.yaw = yawDeg; },
+  probe (x, z) { return canOccupy(x, z); },       /* debug: collision at a point */
+  scene,                                          /* debug: the THREE scene */
+  enterXR
+};
+
+/* start: probe XR, show the enter-VR button on document.body (requestSession
+   needs a user gesture), then run the single loop for every mode */
+probeXR().then(() => {
+  if (xrKind && UI_ON) {
+    const btn = document.createElement('button');
+    btn.id = 'xrBtn';                     /* styled by the unified #enterXR,#xrBtn rule */
+    btn.textContent = xrBtnLabel(xrKind);
+    btn.addEventListener('click', () => { enterXR(); });
+    document.body.appendChild(btn);
+    xrBtnEl = btn;
+  }
+  if (isTouchDevice()) addWalkBtn();
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setAnimationLoop(tick);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,1262 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<!-- Version marker: 2026-11-05c (do not remove; used for HMR freshness check) -->
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<link rel="icon" href="data:,">
+<title>walking_xr — เดินในพื้นที่ภูเขา (WebXR + three.js)</title>
+<!-- ============================================================================
+  walking_xr — WebXR walking in a mountain area (three.js r169, vendored).
+
+  Design (ported from old_version/walk-terrain.html — the A-Frame prototype whose
+  math passed 79/79 harness checks; terrain/tree/walk math is kept identical
+  except where the new request changed it):
+
+  ── Interaction: "look down ≈ 20° = walk" (bow-to-walk) ─────────────────────
+    * ENGAGE = 20° — per the request: "looking downward about 20 degrees from
+      the horizon" starts smooth continuous walking in the horizontal component
+      of the gaze (straight / left / right as the user looks to the side).
+      (Old A-Frame version used 34° with a comfort argument; 20° is kept because
+      the request asks for it; speed ramps to full at 48°.)
+    * Speed: 0 at engage → maxSpeed (2.3 m/s = 2× the original) at full bow,
+      smoothed with exponential easing (tau 0.12 s) + accel cap 5.0 m/s².
+    * Bow beyond 70°: horizontal gaze component is meaningless (cos 70° ≈ 0.34)
+      → keep the last heading ("LAST LOOK").
+    * Collision: slope > 18° blocks, tree trunks (rTrunk+0.35) block, area edge
+      (HALF-1.5) blocks. Movement in 0.15 m substeps (advance()).
+    * Terrain, ridge wall, seeded planting and colors: same math as the verified
+      prototype — one h(x,z) shared by HUD / mesh / plant bases / collisions.
+    * AREA 3× larger (user request): walk area ±66 m, mesh ±102 m, boundary
+      ridge wall ~50 m. EVERY terrain parameter (hill positions/widths, ridge
+      wavelengths and height, noise frequencies) is scaled by the same factor,
+      so the landscape keeps its exact proportions — just three times bigger.
+    * SPECIES ZONES: a coarse 12 m lattice + two majority-smoothing passes give
+      every neighbourhood a single species → plants of the same kind grow in
+      clusters: pine, round tree, shrub, BANANA (smooth green pseudo-stem +
+      drooping paddle leaves) and low HERBS (leaf blades sprouting straight
+      from the ground + tiny flowers — you walk right through them).
+    * FAUNA: butterflies flutter in a loose ring around whoever walks (daytime
+      only); birds circle high above the area with flapping wings. Instanced,
+      animated every frame, seeded deterministic paths.
+  ── Modes ────────────────────────────────────────────────────────────────────
+    * immersive-vr if supported (local-floor); else immersive-ar (passthrough:
+      hide sky). In XR the player does not move the camera — the world group is
+      offset by (-px,-gs,-pz) so the ground under the feet stays at floor level.
+    * Otherwise / on request: flat screen = FPS fallback — WASD walk, mouse
+      (pointer-lock) or touch-drag look, hold Space = try the same gaze-walk.
+  ── URL/debug hooks (headless verification) ──────────────────────────────────
+    ?pos=x,z      start player position      ?look=pitch,yaw  deg (flat look)
+    ?walk=1       force gaze-walk in flat mode (for screenshots/tests)
+    ?seg=128      terrain segments (default; use 96 or 64 on weak devices)
+    ?trees=N      planted species count (default 320, max 1200)
+    ?ui=1         show help text + status readout. The page has NO text by
+                  default: only the enter-XR button (bottom-left) and a
+                  "← index" link (top-left). ?ui=0 hides the buttons too
+    ?tod=hours    start clock (0–24)
+    ?dayspeed=N   world-time multiplier; default 144 → full cycle 600 s
+                  (day 6–18 h = 5 min, night = 5 min). 0 = frozen clock
+    ?noshadow=1   debug: skip the shadow pass (fast headless logic tests)
+    window.__app = { status(), setPlayer(x,z), setLook(pitchDeg,yawDeg), setTod(hours), probe(x,z), enterXR }
+============================================================================ -->
+<style>
+:root { --fg:#e8f4ff; --dim:#9fb3c8; --acc:#4cc9f0; --warn:#ffb347; --bg:#0b1220; }
+* { box-sizing:border-box; }
+html, body { margin:0; padding:0; background:var(--bg); color:var(--fg);
+  font-family: system-ui, "Noto Sans Thai", "Sarabun", sans-serif; line-height:1.5;
+  height:100%; overflow:hidden; touch-action:none; -webkit-user-select:none; user-select:none; }
+#hud { position:fixed; left:0; bottom:0; z-index:10; width:min(64vw,520px);
+  background:#0b1220dd; border-top:1px solid #22384d; padding:8px 12px; font-size:13px; }
+#readout { font-family: ui-monospace, "DejaVu Sans Mono", monospace; font-size:12px;
+  white-space:pre; margin:6px 0 0; }
+#help { position:fixed; left:0; top:0; z-index:10; max-width:520px;
+  background:#0b1220dd; border-bottom:1px solid #22384d; padding:10px 14px; font-size:13px; }
+#help h1 { font-size:16px; color:var(--acc); margin:0 0 4px; }
+.warn { color:var(--warn); }
+/* unified first-page UI (same position in all 5 media) */
+#backIdx { position:fixed; left:14px; top:14px; z-index:40;
+  font:600 14px/1.2 system-ui,"Noto Sans Thai",sans-serif; padding:9px 14px;
+  border:1px solid var(--acc); background:#0b1220cc; color:var(--fg); border-radius:8px; text-decoration:none; }
+#enterXR, #xrBtn { position:fixed; left:14px; bottom:14px; z-index:40;
+  font:600 16px/1.2 system-ui,"Noto Sans Thai",sans-serif; padding:10px 18px;
+  border:1px solid var(--acc); background:#12314a; color:var(--fg); border-radius:8px; cursor:pointer; }
+canvas { position:fixed; inset:0; display:block; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ============ Section 1 — math only (ported from walk-terrain.html) ========== */
+/* AREA ×3 (user request): every terrain parameter — walk half-width, hill
+   positions/widths, ridge start/length/height and all noise frequencies — is
+   scaled by the same factor, so the landscape keeps its exact proportions. */
+const HALF = 66, MESH_HALF = 102, RIDGE_START = 66, RIDGE_H = 50, RIDGE_LEN = 36;
+const HILLS = [
+  { a:  2.5, x0:  12.0, z0:   9.0, s: 21.0 },
+  { a:  1.8, x0: -27.0, z0:  21.0, s: 24.0 },
+  { a: -1.4, x0:  24.0, z0: -30.0, s: 27.0 } ];
+const RIDGES = [
+  { a: 0.36, b: 0.0667, c: 0.0567, d: 0.0, e: 0.0 },
+  { a: 0.16, b: 0.1467, c: 0.1233, d: 1.2, e: -0.6 } ];
+const RAD = Math.PI / 180;
+
+function ridgeMod (x, z) {
+  return 1 + 0.38 * Math.sin(0.11 * x + 0.7) * Math.sin(0.0967 * z - 0.4)
+         + 0.18 * Math.sin(0.2033 * x - 0.2) * Math.cos(0.1767 * z + 1.1);
+}
+function ridgeU (x, z) {
+  const a = Math.max(Math.abs(x), Math.abs(z));
+  return a <= RIDGE_START ? 0 : (a - RIDGE_START) / RIDGE_LEN;
+}
+function terrainH (x, z) {
+  let v = 0;
+  for (const p of HILLS) v += p.a * Math.exp(-((x - p.x0) ** 2 + (z - p.z0) ** 2) / (2 * p.s * p.s));
+  for (const r of RIDGES) v += r.a * Math.sin(r.b * x + r.d) * Math.cos(r.c * z + r.e);
+  const u = ridgeU(x, z);
+  if (u > 0) v += RIDGE_H * u * u * ridgeMod(x, z);
+  return v;
+}
+function terrainGrad (x, z) {
+  let gx = 0, gz = 0;
+  for (const p of HILLS) {
+    const g = Math.exp(-((x - p.x0) ** 2 + (z - p.z0) ** 2) / (2 * p.s * p.s));
+    gx += -p.a * g * (x - p.x0) / (p.s * p.s);
+    gz += -p.a * g * (z - p.z0) / (p.s * p.s);
+  }
+  for (const r of RIDGES) {
+    gx +=  r.a * r.b * Math.cos(r.b * x + r.d) * Math.cos(r.c * z + r.e);
+    gz += -r.a * r.c * Math.sin(r.b * x + r.d) * Math.sin(r.c * z + r.e);
+  }
+  const u = ridgeU(x, z);
+  if (u > 0) {
+    const m = ridgeMod(x, z), mx = Math.abs(x), mz = Math.abs(z);
+    const du = 2 * RIDGE_H * u / RIDGE_LEN, quad = RIDGE_H * u * u;
+    const dmx = 0.38 * 0.11 * Math.cos(0.11 * x + 0.7) * Math.sin(0.0967 * z - 0.4)
+              + 0.18 * 0.2033 * Math.cos(0.2033 * x - 0.2) * Math.cos(0.1767 * z + 1.1);
+    const dmz = 0.38 * 0.0967 * Math.sin(0.11 * x + 0.7) * Math.cos(0.0967 * z - 0.4)
+              - 0.18 * 0.1767 * Math.sin(0.2033 * x - 0.2) * Math.sin(0.1767 * z + 1.1);
+    gx += quad * dmx; gz += quad * dmz;
+    if (mx >= mz) gx += du * Math.sign(x) * m;
+    if (mz >  mx) gz += du * Math.sign(z) * m;
+  }
+  return [gx, gz];
+}
+function slopeDeg (x, z) {
+  const g = terrainGrad(x, z);
+  return Math.atan(Math.hypot(g[0], g[1])) / RAD;
+}
+function elevationRange () {
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i <= 220; i++) {
+    const x = -HALF + (2 * HALF) * i / 220;
+    for (let j = 0; j <= 220; j++) {
+      const e = terrainH(x, -HALF + (2 * HALF) * j / 220);
+      if (e < lo) lo = e;
+      if (e > hi) hi = e;
+    }
+  }
+  return { lo, hi };
+}
+function chooseStart () {
+  /* flattest reachable spot, 3–12 m from the origin */
+  let best = null;
+  for (let i = -24; i <= 24; i++) for (let j = -24; j <= 24; j++) {
+    const x = i * 0.5, z = j * 0.5, s = slopeDeg(x, z), e = terrainH(x, z), r = Math.hypot(x, z);
+    if (r < 3 || r > 12) continue;
+    if (e < -0.5) continue;
+    const score = s + 0.06 * r;
+    if (!best || score < best.score) best = { x, z, y: e, slope: s, score };
+  }
+  return best;
+}
+function mulberry32 (seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), 1 | t);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const state = {
+  seed: 20261103, trees: 320, tod: 10,                      /* tod = clock in hours */
+  px: 0, pz: 0, gs: 0,                       /* pos + smoothed ground height */
+  lastHeading: { x: 0, z: -1 },
+  speed: 0, bow: 0, pathLen: 0, blockedMsg: '',
+  yaw: 0, pitch: 0, mode: 'flat'             /* yaw/pitch: flat-mode look only */
+};
+
+/* mixed forest planted in SPECIES ZONES: a coarse 12 m lattice assigns one
+   species per cell, two majority-smoothing passes merge neighbours into blobs —
+   so each neighbourhood is dominated by ONE kind growing close together
+   ("จัดโซนให้แต่ละพื้นที่มีต้นไม้ชนิดเดียวกันขึ้นอยู่ใกล้ๆกัน").
+   Species: pine (varied height 3.2–8.5 m, 2–5 cone layers), round-crowned
+   tree (trunk + angled branches + blob crowns), low multi-blob shrub,
+   BANANA (smooth light-green pseudo-stem 2.3–4.5 m + drooping paddle leaves
+   + hanging fruit bunch) and low HERBS (leaf blades sprouting straight from
+   the ground + tiny flowers — walk right through them, no collision).
+   Seeded → the same layout and the same zones on every load. */
+const SPECIES = ['pine', 'round', 'shrub', 'banana', 'herb'];
+const TREE_SPACING = { pine: 3.0, round: 3.0, shrub: 1.8, banana: 2.2, herb: 1.0 };
+
+function speciesZones (rng) {
+  const CELL = 12, NS = Math.ceil((2 * (HALF - 2.5)) / CELL) + 2;
+  const ZW = [0.34, 0.18, 0.15, 0.17, 0.16];        /* pine/round/shrub/banana/herb */
+  const pick = (r) => { let s = 0; for (let i = 0; i < ZW.length; i++) { s += ZW[i]; if (r < s) return i; } return ZW.length - 1; };
+  let lat = [];
+  for (let i = 0; i < NS; i++) { const row = []; for (let j = 0; j < NS; j++) row.push(pick(rng())); lat.push(row); }
+  for (let pass = 0; pass < 2; pass++) {             /* merge neighbours → blob-like zones */
+    const nxt = lat.map(r => r.slice());
+    for (let i = 1; i < NS - 1; i++) for (let j = 1; j < NS - 1; j++) {
+      const t = [0, 0, 0, 0, 0];
+      t[lat[i - 1][j]]++; t[lat[i + 1][j]]++; t[lat[i][j - 1]]++; t[lat[i][j + 1]]++;
+      let best = lat[i][j], bestN = 0;
+      for (let s = 0; s < 5; s++) if (t[s] > bestN) { bestN = t[s]; best = s; }
+      if (bestN >= 3) nxt[i][j] = best;
+    }
+    lat = nxt;
+  }
+  return {
+    speciesAt (x, z) {
+      const i = Math.min(NS - 1, Math.max(0, Math.floor((x + HALF) / CELL)));
+      const j = Math.min(NS - 1, Math.max(0, Math.floor((z + HALF) / CELL)));
+      return SPECIES[lat[i][j]];
+    }
+  };
+}
+
+function computePines (seed, count, start) {
+  const rng = mulberry32(seed);
+  const zones = speciesZones(rng);
+  const er = elevationRange();
+  const out = [];
+  let tries = 0;
+  while (out.length < count && tries < 120000) {
+    tries++;
+    const x = (rng() * 2 - 1) * (HALF - 2.5);
+    const z = (rng() * 2 - 1) * (HALF - 2.5);
+    if (slopeDeg(x, z) > 14) continue;
+    if (terrainH(x, z) < er.lo + 0.5) continue;
+    if (Math.hypot(x - start.x, z - start.z) < 2.5) continue;
+    const type = zones.speciesAt(x, z);
+    let clash = false;
+    for (const p of out) {
+      const need = Math.max(TREE_SPACING[p.type], TREE_SPACING[type]);
+      if (Math.hypot(x - p.x, z - p.z) < need) { clash = true; break; }
+    }
+    if (clash) continue;
+    const twist = rng() * Math.PI * 2;
+    if (type === 'pine') {
+      const H = 3.2 + rng() * 5.3;                       /* varied total height */
+      const nCone = 2 + Math.floor(rng() * 4);           /* 2..5 crown layers  */
+      const trunkH = H * (0.08 + rng() * 0.12);
+      const rTrunk = Math.max(0.07, H * (0.018 + rng() * 0.010));
+      const crownR = H * (0.11 + rng() * 0.06);
+      const parts = [{ k: 'trunk', r: rTrunk, len: trunkH }];
+      let baseY = trunkH * (0.45 + rng() * 0.40);
+      for (let i = 0; i < nCone; i++) {
+        const t = i / nCone;
+        const cr = crownR * (1 - 0.55 * t) * (0.90 + rng() * 0.25);
+        const ch = Math.max(0.8, (H - baseY) / (nCone - i) * (1.15 + rng() * 0.50));
+        parts.push({ k: 'cone', i, r: cr, h: ch, baseY });
+        baseY += ch * (0.32 + rng() * 0.25);
+      }
+      out.push({ x, z, y: terrainH(x, z), type, H, layers: nCone, parts, rTrunk,
+                 tint: 0.80 + rng() * 0.30, twist });
+    } else if (type === 'round') {
+      const trunkH = 2.6 + rng() * 2.6;
+      const rTrunk = 0.14 + rng() * 0.16;
+      const crownR = 1.2 + rng() * 1.2;
+      const nBlob = 1 + Math.floor(rng() * 4);           /* 1..4 round-crown blobs */
+      const nBr = 2 + Math.floor(rng() * 3);             /* 2..4 branches          */
+      const CY = trunkH + crownR * 0.20;               /* crown centre: ON the trunk top */
+      const parts = [{ k: 'trunk', r: rTrunk, len: trunkH }];
+      for (let i = 0; i < nBr; i++) {
+        const az = (i + rng() * 0.6) * Math.PI * 2 / nBr;
+        const bl = crownR * (0.90 + rng() * 0.55), bt = 0.35 + rng() * 0.30;   /* gentle upward rake */
+        const y0 = trunkH * (0.60 + rng() * 0.30);
+        parts.push({ k: 'branch', len: bl, r: rTrunk * 0.45, az, tilt: bt, y0 });
+        /* leaf cluster AT the branch tip → branches visibly join the crown */
+        const reach = rTrunk * 0.45 + 0.62 * bl * Math.sin(bt);
+        parts.push({ k: 'blob', r: crownR * (0.30 + rng() * 0.20),
+                     ox: Math.cos(az) * reach, oz: Math.sin(az) * reach,
+                     oy: y0 + 0.62 * bl * Math.cos(bt) });
+      }
+      for (let i = 0; i < nBlob; i++) {
+        const br = crownR * (0.45 + rng() * 0.40);
+        const az = rng() * Math.PI * 2, off = rng() * crownR * 0.45;
+        parts.push({ k: 'blob', r: br, ox: Math.cos(az) * off, oz: Math.sin(az) * off,
+                     oy: CY + (rng() - 0.45) * crownR * 0.45 });
+      }
+      out.push({ x, z, y: terrainH(x, z), type, H: trunkH + crownR * 1.4, layers: nBlob, parts,
+                 rTrunk, tint: 0.75 + rng() * 0.35, twist });
+    } else if (type === 'shrub') {
+      const nBlob = 2 + Math.floor(rng() * 3);           /* shrub: 2..4 blob cluster */
+      const parts = [];
+      let rMax = 0;
+      for (let i = 0; i < nBlob; i++) {
+        const br = 0.28 + rng() * 0.42;
+        rMax = Math.max(rMax, br);
+        const az = rng() * Math.PI * 2, off = rng() * 0.45;
+        parts.push({ k: 'blob', r: br, ox: Math.cos(az) * off, oz: Math.sin(az) * off,
+                     oy: br * (0.60 + rng() * 0.35) });
+      }
+      out.push({ x, z, y: terrainH(x, z), type, H: rMax * 1.6, layers: 0, parts,
+                 rTrunk: 0.30, tint: 0.80 + rng() * 0.30, twist });
+    } else if (type === 'banana') {
+      const H = 2.3 + rng() * 2.2;                       /* pseudo-stem 2.3–4.5 m */
+      const rStem = 0.11 + rng() * 0.05;
+      const nLeaf = 6 + Math.floor(rng() * 4);           /* 6..9 drooping paddles */
+      const parts = [{ k: 'stem', r: rStem, len: H }];
+      for (let i = 0; i < nLeaf; i++) {
+        const len = Math.max(0.55, H * (0.34 + rng() * 0.30));      /* leaf 0.6–1.8 m */
+        const az = (i + rng() * 0.55) * Math.PI * 2 / nLeaf;
+        const tilt = -(0.35 + rng() * 0.55);                         /* always droop 20°–52° down */
+        const off = len * (0.30 + rng() * 0.12);                    /* ≤0.42·len → leaf overlaps stem */
+        parts.push({ k: 'leaf', flat: true, len, w: len * (0.24 + rng() * 0.14), az, tilt,
+                     cx: Math.cos(az) * off, cz: -Math.sin(az) * off,
+                     cy: H * (0.80 + rng() * 0.18) - Math.sin(-tilt) * off });
+      }
+      if (rng() < 0.7) {                                  /* hanging fruit bunch */
+        const br = 0.09 + rng() * 0.07, az = rng() * Math.PI * 2;
+        parts.push({ k: 'bloom', r: br, ox: Math.cos(az) * 0.16, oz: Math.sin(az) * 0.16,
+                     oy: H * (0.52 + rng() * 0.20), cr: 0.88, cg: 0.82, cb: 0.36 });
+      }
+      out.push({ x, z, y: terrainH(x, z), type, H, layers: nLeaf, parts,
+                 rTrunk: rStem + 0.12, tint: 1, twist });
+    } else {                                             /* herb: blades from the ground */
+      const maxLen = 0.45 + rng() * 0.55;                /* tallest blade 0.45–1.0 m */
+      const nLeaf = 3 + Math.floor(rng() * 4);           /* 3..6 leaf blades   */
+      const parts = [];
+      for (let i = 0; i < nLeaf; i++) {
+        const len = maxLen * (0.75 + rng() * 0.40);
+        const az = (i + rng() * 0.80) * Math.PI * 2 / nLeaf;
+        parts.push({ k: 'leaf', flat: false, len, w: 0.07 + rng() * 0.08, az,
+                     tilt: 0.12 + rng() * 0.35, cx: -Math.cos(az) * (0.05 + rng() * 0.12),
+                     cz: Math.sin(az) * (0.05 + rng() * 0.12), cy: len * 0.42 });
+      }
+      if (rng() < 0.75) {                                /* 1..3 tiny flowers */
+        const FL = [[0.95,0.35,0.55],[0.97,0.90,0.40],[0.95,0.85,0.92],[0.96,0.55,0.28]];
+        for (let i = 0, n = 1 + Math.floor(rng() * 3); i < n; i++) {
+          const az = rng() * Math.PI * 2, off = rng() * 0.16, fc = FL[Math.floor(rng() * FL.length)];
+          parts.push({ k: 'bloom', r: 0.045 + rng() * 0.035, ox: Math.sin(az) * off,
+                       oz: Math.cos(az) * off, oy: maxLen * (0.80 + rng() * 0.35),
+                       cr: fc[0], cg: fc[1], cb: fc[2] });
+        }
+      }
+      out.push({ x, z, y: terrainH(x, z), type, H: maxLen * 1.35, layers: nLeaf, parts,
+                 rTrunk: 0, tint: 1, twist });
+    }
+  }
+  return out;
+}
+
+/* ---- walk config (engage 20° per the request; rest from verified prototype) -- */
+const WALK = {
+  engage: 20, full: 48, maxSpeed: 2.3, maxAccel: 5.0, smoothTau: 0.12,
+  slopeBlock: 18, treeClear: 0.35, boundsBlock: 1.5, ambiguousBow: 70
+};
+function bowRamp (bowDeg) {
+  return Math.max(0, Math.min(1, (bowDeg - WALK.engage) / (WALK.full - WALK.engage)));
+}
+function targetSpeed (bowDeg) { return WALK.maxSpeed * bowRamp(bowDeg); }
+function smoothSpeed (current, target, dt) {
+  const k = 1 - Math.exp(-dt / WALK.smoothTau);
+  let next = current + (target - current) * k;
+  const delta = next - current, lim = WALK.maxAccel * dt;
+  if (Math.abs(delta) > lim) next = current + Math.sign(delta) * lim;
+  return Math.max(0, next);
+}
+function headingFrom (fx, fz, bowDeg) {
+  const m = Math.hypot(fx, fz);
+  if (bowDeg > WALK.ambiguousBow || m < 0.12)
+    return { x: state.lastHeading.x, z: state.lastHeading.z, fallback: true };
+  return { x: fx / m, z: fz / m, fallback: false };
+}
+
+/* ---- day/night: clock + sun geometry (pure math, no THREE here) -----------
+   Sun path: due east (+x) at 6 h → max altitude 52° at 12 h → due west (−x)
+   at 18 h. The moon is the antisolar point: it is up exactly when the sun is
+   down, so moonlight direction changes through the night too. */
+const DAY = { tod0: 10, speed: 144 };   /* 144× → full cycle 600 s: day (6–18 h) 5 min, night 5 min — sit still and watch the sun/moon swing */
+function sunModel (tod) {
+  const f = (tod - 6) / 12;
+  const altR = Math.sin(f * Math.PI) * (52 * RAD);
+  const azR = Math.PI * f;
+  const c = Math.cos(altR);
+  const d = { x: c * Math.cos(azR), y: Math.sin(altR), z: -0.35 * c * Math.sin(azR) };
+  const m = Math.hypot(d.x, d.y, d.z) || 1;
+  return { dir: { x: d.x / m, y: d.y / m, z: d.z / m }, altDeg: altR / RAD };
+}
+let pines = [];
+function blockedByPine (x, z) {
+  for (const p of pines) {
+    if (!p.rTrunk) continue;          /* low herbs: soft plants — walk right through */
+    const dx = x - p.x, dz = z - p.z, rr = p.rTrunk + WALK.treeClear;
+    if (dx * dx + dz * dz < rr * rr) return p;
+  }
+  return null;
+}
+function canOccupy (x, z) {
+  const edge = HALF - WALK.boundsBlock;
+  if (Math.abs(x) > edge || Math.abs(z) > edge) return { ok: false, reason: 'OUT OF AREA' };
+  const s = slopeDeg(x, z);
+  if (s > WALK.slopeBlock) return { ok: false, reason: 'TOO STEEP ' + s.toFixed(0) + ' DEG' };
+  if (blockedByPine(x, z)) return { ok: false, reason: 'TREE TRUNK' };
+  return { ok: true };
+}
+function advance (heading, distance) {
+  let x = state.px, z = state.pz, moved = 0, blocked = null;
+  while (moved < distance - 1e-9) {
+    const d = Math.min(0.15, distance - moved);
+    const nx = x + heading.x * d, nz = z + heading.z * d;
+    const c = canOccupy(nx, nz);
+    if (!c.ok) { blocked = c.reason; break; }
+    x = nx; z = nz; moved += d;
+  }
+  return { x, z, moved, blocked };
+}
+function slideMove (dx, dz) {
+  /* FPS movement: advance, sliding along one axis when the diagonal is blocked */
+  let moved = 0;
+  const steps = Math.max(1, Math.ceil(Math.hypot(dx, dz) / 0.15));
+  for (let i = 0; i < steps; i++) {
+    const sx = dx / steps, sz = dz / steps;
+    if (canOccupy(state.px + sx, state.pz + sz).ok) { state.px += sx; state.pz += sz; moved += Math.hypot(sx, sz); continue; }
+    if (canOccupy(state.px + sx, state.pz).ok) { state.px += sx; moved += Math.abs(sx); continue; }
+    if (canOccupy(state.px, state.pz + sz).ok) { state.pz += sz; moved += Math.abs(sz); continue; }
+    break;
+  }
+  return moved;
+}
+
+/* colors: verified prototype scheme + snow above ~8 m on the ridge wall */
+function terrainColor (e, x, z, er) {
+  const u = ridgeU(x, z);
+  if (u > 0) {
+    const t = Math.min(1, u);
+    let r = 0.15 + 0.33 * t, g = 0.23 + 0.31 * t, b = 0.15 + 0.29 * t;
+    const c = Math.max(0, Math.min(1, (slopeDeg(x, z) - 26) / 16));
+    r += 0.40 * c; g += 0.38 * c; b += 0.35 * c;
+    const sn = Math.max(0, Math.min(1, (e - 8) / 4));
+    r += (0.92 - r) * sn * 0.8; g += (0.94 - g) * sn * 0.8; b += (0.96 - b) * sn * 0.8;
+    return [Math.min(1, r), Math.min(1, g), Math.max(0, Math.min(1, b))];
+  }
+  const t = Math.max(0, Math.min(1, (e - er.lo) / (er.hi - er.lo)));
+  let r = 0.10 + 0.40 * t, g = 0.28 + 0.44 * t, b = 0.20 + 0.18 * t;
+  const s = Math.max(0, Math.min(1, (slopeDeg(x, z) - 18) / 8));
+  r += 0.55 * s; g += 0.16 * s; b -= 0.10 * s;
+  return [Math.min(1, r), Math.min(1, g), Math.max(0, b)];
+}
+function computeTerrainData (seg) {
+  const N = Math.max(24, seg | 0), W = N + 1, step = (2 * MESH_HALF) / N;
+  const er = elevationRange();
+  const pos = [], col = [], idx = [];
+  for (let i = 0; i <= N; i++) {
+    const x = -MESH_HALF + i * step;
+    for (let j = 0; j <= N; j++) {
+      const z = -MESH_HALF + j * step, e = terrainH(x, z);
+      pos.push(x, e, z);
+      const c = terrainColor(e, x, z, er);
+      col.push(c[0], c[1], c[2]);
+    }
+  }
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    const a = i * W + j, b = a + 1, c = a + W, d = c + 1;
+    idx.push(a, b, c, b, d, c);
+  }
+  return { pos, col, idx };
+}
+
+/* ============ Section 2 — three.js scene ============ */
+const params = new URLSearchParams(location.search);
+const SEG = Math.max(24, Math.min(192, parseInt(params.get('seg') || '128', 10) || 128));
+const UI_ON = params.get('ui') !== '0';           /* gates the XR entry button */
+const TEXT_UI = params.get('ui') === '1';         /* help text + readout: only on request (page shows no text by default) */
+const FORCE_WALK = params.get('walk') === '1';
+const todRaw = parseFloat(params.get('tod'));        /* ?tod=17.5 → เริ่มเวลานั้น (ชม.) */
+if (isFinite(todRaw)) DAY.tod0 = Math.min(24, Math.max(0, todRaw));
+const dsRaw = parseFloat(params.get('dayspeed'));    /* ?dayspeed=N → เวลาเดิน N เท่า (0=หยุด) */
+if (isFinite(dsRaw)) DAY.speed = Math.min(1000, Math.max(0, dsRaw));
+const trRaw = parseInt(params.get('trees'), 10);     /* ?trees=N → จำนวนต้นไม้ (0–1200) */
+if (isFinite(trRaw)) state.trees = Math.min(1200, Math.max(0, trRaw));
+state.tod = DAY.tod0;
+
+const start = chooseStart();
+state.px = start.x; state.pz = start.z; state.gs = start.y;
+pines = computePines(state.seed, state.trees, start);
+
+{
+  const pPos = params.get('pos');
+  if (pPos) {
+    const [x, z] = pPos.split(',').map(Number);
+    if (isFinite(x) && isFinite(z)) { state.px = x; state.pz = z; state.gs = terrainH(x, z); }
+  }
+  const pLook = params.get('look');
+  if (pLook) {
+    const [pitch, yaw] = pLook.split(',').map(Number);
+    if (isFinite(pitch) && isFinite(yaw)) { state.pitch = pitch; state.yaw = yaw; }
+  }
+}
+
+const scene = new THREE.Scene();
+const skyColor = new THREE.Color('#a8c5e2');
+scene.background = skyColor;
+scene.fog = new THREE.Fog('#aec7dd', 70, 300);
+
+/* lens: per-eye acceptance angle 2× wider than before — the same optics as
+   halving the focal length: tan(fov'/2) = 2 × tan(fov/2), 72° → 110.9°.
+   (In an immersive headset the lenses are fixed by the device; this widens
+   the flat/screen view.) */
+const VIEW_FOV = 2 * Math.atan(2 * Math.tan(36 * RAD)) / RAD;      /* ≈110.9° */
+const camera = new THREE.PerspectiveCamera(VIEW_FOV, 1, 0.05, 300);
+camera.rotation.order = 'YXZ';
+camera.position.set(0, 1.6, 0);
+scene.add(camera);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+renderer.xr.enabled = true;
+renderer.shadowMap.enabled = params.get('noshadow') !== '1';   /* ?noshadow=1 debug: skip shadow pass (fast headless logic tests) */
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+/* ---- day/night rig: shadows follow the time of day ------------------------
+   The sun is a real light source whose direction sweeps east→west (its shadow
+   direction changes hour by hour); the moon is the antisolar point, so at
+   night IT is the light whose direction changes. Sky/fog/fill colours are
+   lerped through keyframed palettes (night→dawn→day→sunset→night), plus a
+   visible sun disc, moon disc and a star dome that rotates as time passes. */
+const hemi = new THREE.HemisphereLight('#c8dcec', '#4a5a3a', 0.62);
+scene.add(hemi);
+function addDayLight (hex, intensity) {                /* shadow-casting key light */
+  const L = new THREE.DirectionalLight(hex, intensity);
+  L.castShadow = true;
+  L.shadow.mapSize.set(1024, 1024);
+  Object.assign(L.shadow.camera, { left: -28, right: 28, top: 28, bottom: -28, near: 1, far: 170 });
+  L.shadow.camera.updateProjectionMatrix();
+  L.shadow.bias = -0.0006;
+  L.shadow.normalBias = 0.03;
+  scene.add(L);
+  scene.add(L.target);
+  return L;
+}
+const sun = addDayLight('#fff3d6', 1.05);
+const moon = addDayLight('#9fb4d4', 0.3);
+
+/* keyframed sky palette */
+const SKY_KEYS = [
+  { t: 0.0,  sky: '#0c1224', fog: '#111a2c', hs: '#22304e', hg: '#0e1208', sc: '#3d4f70', si: 0.10, hi: 0.16 },
+  { t: 5.5,  sky: '#2c3c5e', fog: '#374a66', hs: '#46608c', hg: '#141a10', sc: '#7d8db8', si: 0.22, hi: 0.28 },
+  { t: 6.8,  sky: '#c9834f', fog: '#d59a63', hs: '#e0a86a', hg: '#4a3520', sc: '#ff9a52', si: 0.75, hi: 0.42 },
+  { t: 8.0,  sky: '#a8c5e2', fog: '#aec7dd', hs: '#c8dcec', hg: '#4a5a3a', sc: '#ffd9a0', si: 1.00, hi: 0.58 },
+  { t: 12.0, sky: '#bcd6ee', fog: '#c2d7ea', hs: '#d4e6f4', hg: '#50613e', sc: '#fff4dc', si: 1.12, hi: 0.62 },
+  { t: 16.5, sky: '#a8c5e2', fog: '#aec7dd', hs: '#c8dcec', hg: '#4a5a3a', sc: '#ffd9a0', si: 1.00, hi: 0.58 },
+  { t: 18.2, sky: '#cf7a42', fog: '#d99257', hs: '#e2a268', hg: '#463218', sc: '#ff8c42', si: 0.78, hi: 0.42 },
+  { t: 19.5, sky: '#31405f', fog: '#3b4e6e', hs: '#4a6492', hg: '#131809', sc: '#7484ac', si: 0.24, hi: 0.26 },
+  { t: 24.0, sky: '#0c1224', fog: '#111a2c', hs: '#22304e', hg: '#0e1208', sc: '#3d4f70', si: 0.10, hi: 0.16 }
+];
+for (const k of SKY_KEYS) {
+  k.S = new THREE.Color(k.sky); k.F = new THREE.Color(k.fog);
+  k.HS = new THREE.Color(k.hs); k.HG = new THREE.Color(k.hg); k.SC = new THREE.Color(k.sc);
+}
+const _S = { bg: new THREE.Color(), fog: new THREE.Color(), hs: new THREE.Color(),
+             hg: new THREE.Color(), sc: new THREE.Color(), si: 0, hi: 0 };
+function skyAt (tod) {
+  let i = 0;
+  while (i < SKY_KEYS.length - 2 && SKY_KEYS[i + 1].t <= tod) i++;
+  const a = SKY_KEYS[i], b = SKY_KEYS[i + 1];
+  const u = Math.max(0, Math.min(1, (tod - a.t) / (b.t - a.t)));
+  _S.bg.copy(a.S).lerp(b.S, u); _S.fog.copy(a.F).lerp(b.F, u);
+  _S.hs.copy(a.HS).lerp(b.HS, u); _S.hg.copy(a.HG).lerp(b.HG, u);
+  _S.sc.copy(a.SC).lerp(b.SC, u);
+  _S.si = a.si + (b.si - a.si) * u;
+  _S.hi = a.hi + (b.hi - a.hi) * u;
+  return _S;
+}
+
+/* sun + moon billboards, stars dome (visual only, unaffected by fog) */
+function makeDisc (rCore, coreHex, haloHex, haloOp) {
+  const g = new THREE.Group();
+  const halo = new THREE.Mesh(new THREE.CircleGeometry(rCore * 1.85, 40),
+    new THREE.MeshBasicMaterial({ color: haloHex, transparent: true, opacity: haloOp,
+                                  fog: false, depthWrite: false }));
+  halo.position.z = -0.5;
+  const core = new THREE.Mesh(new THREE.CircleGeometry(rCore, 40),
+    new THREE.MeshBasicMaterial({ color: coreHex, transparent: true, opacity: 0.97, fog: false }));
+  g.add(halo, core);
+  g.visible = false;
+  scene.add(g);
+  return g;
+}
+const sunDisc = makeDisc(6, '#fff2c8', '#ffe9a8', 0.30);
+const moonDisc = makeDisc(4.6, '#e6ecf5', '#c9d6e8', 0.20);
+
+const STARS = 430;
+const starPos = new Float32Array(STARS * 3), starCol = new Float32Array(STARS * 3);
+{
+  const rng = mulberry32(20261105);
+  for (let i = 0; i < STARS; i++) {
+    const a = rng() * Math.PI * 2, y = 0.06 + rng() * 0.94;
+    const h = Math.sqrt(1 - y * y), R = 235;
+    starPos[i * 3] = Math.cos(a) * h * R;
+    starPos[i * 3 + 1] = y * R;
+    starPos[i * 3 + 2] = Math.sin(a) * h * R;
+    const w = 0.55 + rng() * 0.45;                    /* white→blue faint tints */
+    starCol[i * 3] = w * (0.78 + rng() * 0.22);
+    starCol[i * 3 + 1] = w * (0.84 + rng() * 0.16);
+    starCol[i * 3 + 2] = w;
+  }
+}
+const starGeo = new THREE.BufferGeometry();
+starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+starGeo.setAttribute('color', new THREE.BufferAttribute(starCol, 3));
+const starsMat = new THREE.PointsMaterial({ size: 2.3, sizeAttenuation: false, vertexColors: true,
+  transparent: true, opacity: 0, fog: false, depthWrite: false });
+const stars = new THREE.Points(starGeo, starsMat);
+stars.visible = false;
+stars.frustumCulled = false;
+scene.add(stars);
+
+function fmtTod (h) {
+  const hh = Math.floor(h), mm = Math.floor((h - hh) * 60);
+  return String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
+}
+const _white = new THREE.Color('#ffffff');
+function applyTod (tod) {
+  const S = skyAt(tod), M = sunModel(tod);
+  const passthrough = state.mode === 'ar';            /* AR = show the real room */
+  if (!passthrough) {
+    if (scene.background !== skyColor) scene.background = skyColor;
+    skyColor.copy(S.bg);
+  }
+  scene.fog.color.copy(S.fog);
+  hemi.color.copy(S.hs); hemi.groundColor.copy(S.hg); hemi.intensity = S.hi;
+
+  const sunUp = M.altDeg > 0.5, moonAlt = -M.altDeg;
+  sun.visible = sunUp;                               /* off = no sun shadow pass */
+  sun.color.copy(S.sc); sun.intensity = S.si;
+  sun.position.set(M.dir.x * 55, Math.max(M.dir.y, 0.04) * 55, M.dir.z * 55);
+  sun.target.position.set(0, 0.5, 0);
+
+  const mi = Math.max(0, Math.min(1, moonAlt / 25)) * 0.32;
+  moon.visible = moonAlt > 1 && mi > 0.05;           /* moonlight casts shadows */
+  moon.intensity = mi;
+  moon.position.set(-M.dir.x * 55, Math.max(-M.dir.y, 0.04) * 55, -M.dir.z * 55);
+  moon.target.position.set(0, 0.5, 0);
+
+  const night = Math.max(0, Math.min(1, -M.altDeg / 10));
+  starsMat.opacity = night;
+  stars.visible = night > 0.01 && !passthrough;
+  stars.rotation.y = (tod / 24) * Math.PI * 2;       /* the star dome turns with time */
+
+  /* butterflies are daytime creatures — they rest (hidden) once the sun sets */
+  if (fauna.meshes.imBfly) fauna.meshes.imBfly.visible = sunUp && !passthrough;
+
+  if (!passthrough) {
+    if (sunUp) {
+      sunDisc.visible = true;
+      sunDisc.position.set(M.dir.x * 230, M.dir.y * 230, M.dir.z * 230);
+      sunDisc.lookAt(0, 1.5, 0);
+      const hot = _S.sc.clone().lerp(_white, 0.55);
+      for (const ch of sunDisc.children) ch.material.color.copy(hot);
+    } else sunDisc.visible = false;
+    if (moonAlt > 1) {
+      moonDisc.visible = true;
+      moonDisc.position.set(-M.dir.x * 215, -M.dir.y * 215, -M.dir.z * 215);
+      moonDisc.lookAt(0, 1.5, 0);
+    } else moonDisc.visible = false;
+  } else {
+    sunDisc.visible = moonDisc.visible = stars.visible = false;
+  }
+}
+
+/* world group: the player stays at the XR origin — this group is offset by
+   (-px,-gs,-pz) so the terrain under the feet always sits at floor level */
+const world = new THREE.Group();
+scene.add(world);
+
+{
+  const data = computeTerrainData(SEG);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(data.pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(data.col, 3));
+  g.setIndex(data.idx);
+  g.computeVertexNormals();
+  const terrain = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, metalness: 0.02 }));
+  terrain.receiveShadow = true;
+  world.add(terrain);
+}
+
+/* forest instancing: six unit-part meshes — trunk/branches/banana-stem share
+   a unit cylinder; one unit cone; one faceted sphere blob (crowns, fruit,
+   flowers); one unit plane for leaf paddles/blades (flat = banana paddle,
+   upright = herb blade). Each plant part carries its own matrix — so tree
+   height, crown radius and the NUMBER OF CROWN LAYERS differ per plant;
+   every plant casts a shadow, the ground receives it. */
+{
+  const trunkG = new THREE.CylinderGeometry(0.10, 0.16, 1.5, 8);
+  trunkG.translate(0, 0.75, 0);                      /* unit trunk: base at y=0, height 1.5 */
+  const coneG = new THREE.ConeGeometry(1, 1, 9);
+  coneG.translate(0, 0.5, 0);                        /* unit cone: base y=0 → apex y=1 */
+  const blobG = new THREE.IcosahedronGeometry(1, 1); /* faceted sphere for round crowns */
+  const leafG = new THREE.PlaneGeometry(1, 1);       /* unit leaf plane */
+  let nBark = 0, nCone = 0, nBlob = 0, nStem = 0, nLeaf = 0, nBloom = 0;
+  for (const p of pines) for (const q of p.parts) {
+    if (q.k === 'trunk' || q.k === 'branch') nBark++;
+    else if (q.k === 'cone') nCone++;
+    else if (q.k === 'stem') nStem++;
+    else if (q.k === 'leaf') nLeaf++;
+    else if (q.k === 'bloom') nBloom++;
+    else nBlob++;
+  }
+  const imBark = new THREE.InstancedMesh(trunkG,
+    new THREE.MeshStandardMaterial({ color: '#5a3a24', roughness: 0.95 }), nBark);
+  const imCone = new THREE.InstancedMesh(coneG,
+    new THREE.MeshStandardMaterial({ color: '#1f5a2c', roughness: 0.9, flatShading: true }), nCone);
+  const imBlob = new THREE.InstancedMesh(blobG,
+    new THREE.MeshStandardMaterial({ color: '#2c6e33', roughness: 0.95, flatShading: true }), nBlob);
+  const imStem = new THREE.InstancedMesh(trunkG,
+    new THREE.MeshStandardMaterial({ color: '#7fa24e', roughness: 0.9, flatShading: true }), nStem);
+  const imLeaf = new THREE.InstancedMesh(leafG,
+    new THREE.MeshStandardMaterial({ color: '#5f9c3a', roughness: 0.9, side: THREE.DoubleSide }), nLeaf);
+  const imBloom = new THREE.InstancedMesh(blobG,
+    new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.85, flatShading: true }), nBloom);
+  const dummy = new THREE.Object3D(), col = new THREE.Color();
+  const UP = new THREE.Vector3(0, 1, 0), AXZ = new THREE.Vector3(0, 0, 1), AXX = new THREE.Vector3(1, 0, 0);
+  const _q = new THREE.Quaternion(), euler = new THREE.Euler();
+  let iB = 0, iC = 0, iL = 0, iS = 0, iF = 0, iFl = 0;
+  for (const p of pines) {
+    for (const q of p.parts) {
+      dummy.position.set(p.x, p.y, p.z);
+      if (q.k === 'trunk') {
+        dummy.quaternion.setFromAxisAngle(UP, p.twist);
+        dummy.scale.set(q.r / 0.16, q.len / 1.5, q.r / 0.16);
+        col.setRGB(p.tint, p.tint * 0.88, p.tint * 0.72);
+        dummy.updateMatrix();
+        imBark.setMatrixAt(iB, dummy.matrix); imBark.setColorAt(iB++, col);
+      } else if (q.k === 'branch') {
+        dummy.position.set(p.x + Math.cos(q.az) * q.r, p.y + q.y0, p.z + Math.sin(q.az) * q.r);
+        euler.set(0, q.az, -q.tilt, 'YZX');          /* tilt radially outward in azimuth az */
+        dummy.quaternion.setFromEuler(euler);
+        dummy.scale.set(q.r / 0.16, q.len / 1.5, q.r / 0.16);
+        col.setRGB(p.tint * 0.9, p.tint * 0.8, p.tint * 0.66);
+        dummy.updateMatrix();
+        imBark.setMatrixAt(iB, dummy.matrix); imBark.setColorAt(iB++, col);
+      } else if (q.k === 'cone') {
+        dummy.position.y += q.baseY;
+        dummy.quaternion.setFromAxisAngle(UP, p.twist + q.i * 0.7);
+        dummy.scale.set(q.r, q.h, q.r);
+        col.setRGB(p.tint, p.tint, p.tint);
+        dummy.updateMatrix();
+        imCone.setMatrixAt(iC, dummy.matrix); imCone.setColorAt(iC++, col);
+      } else if (q.k === 'stem') {                   /* banana pseudo-stem: light green */
+        dummy.quaternion.setFromAxisAngle(UP, p.twist);
+        dummy.scale.set(q.r / 0.16, q.len / 1.5, q.r / 0.16);
+        const jt = ((p.twist * 131.7) % 1 + 1) % 1;
+        col.setRGB(0.95 + jt * 0.25, 1.05, 0.85 + jt * 0.2);
+        dummy.updateMatrix();
+        imStem.setMatrixAt(iS, dummy.matrix); imStem.setColorAt(iS++, col);
+      } else if (q.k === 'leaf') {                   /* banana paddle (flat) / herb blade (upright) */
+        dummy.position.set(p.x + q.cx, p.y + q.cy, p.z + q.cz);
+        dummy.quaternion.setFromAxisAngle(UP, q.az);
+        _q.setFromAxisAngle(AXZ, q.tilt); dummy.quaternion.multiply(_q);
+        if (q.flat) { _q.setFromAxisAngle(AXX, -Math.PI / 2); dummy.quaternion.multiply(_q); }
+        if (q.flat) dummy.scale.set(q.len, q.w, 1); else dummy.scale.set(q.w, q.len, 1);
+        const jt = ((p.twist * 131.7 + q.az * 17.31) % 1 + 1) % 1;
+        if (p.type === 'banana') col.setRGB(1.35 + jt * 0.35, 1.45, 0.75 + jt * 0.2);
+        else col.setRGB(0.72 + jt * 0.4, 0.95, 0.55 + jt * 0.25);
+        dummy.updateMatrix();
+        imLeaf.setMatrixAt(iF, dummy.matrix); imLeaf.setColorAt(iF++, col);
+      } else if (q.k === 'bloom') {                  /* fruit bunch / herb flowers */
+        dummy.position.set(p.x + q.ox, p.y + q.oy, p.z + q.oz);
+        dummy.quaternion.setFromAxisAngle(UP, Math.atan2(q.oz, q.ox));
+        dummy.scale.set(q.r, q.r * 0.95, q.r);
+        col.setRGB(q.cr, q.cg, q.cb);
+        dummy.updateMatrix();
+        imBloom.setMatrixAt(iFl, dummy.matrix); imBloom.setColorAt(iFl++, col);
+      } else {
+        dummy.position.set(p.x + q.ox, p.y + q.oy, p.z + q.oz);
+        dummy.quaternion.setFromAxisAngle(UP, Math.atan2(q.oz, q.ox));
+        dummy.scale.set(q.r, q.r * 0.92, q.r);
+        col.setRGB(p.tint * 0.8, p.tint, p.tint * 0.62);
+        dummy.updateMatrix();
+        imBlob.setMatrixAt(iL, dummy.matrix); imBlob.setColorAt(iL++, col);
+      }
+    }
+  }
+  for (const im of [imBark, imCone, imBlob, imStem, imLeaf, imBloom]) {
+    im.instanceMatrix.needsUpdate = true;
+    if (im.instanceColor) im.instanceColor.needsUpdate = true;
+    im.castShadow = true;
+    im.receiveShadow = true;
+    world.add(im);
+  }
+}
+
+/* ground detail: scattered stones + small grass tufts so walking reads clearly
+   across the open grass (visual only — NO collision, you walk over them).
+   placed in terrain coords, same as the pines; seeded = deterministic layout */
+const decor = { rocks: 0, tufts: 0 };
+{
+  const rng = mulberry32(20261104);
+  const dummy = new THREE.Object3D(), col = new THREE.Color();
+  const nearTrunk = (x, z, pad) => pines.some(p => Math.hypot(x - p.x, z - p.z) < p.rTrunk + pad);
+
+  const rocks = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(1, 0),
+    new THREE.MeshStandardMaterial({ color: '#8a8d80', roughness: 0.95, metalness: 0.03, flatShading: true }), 1200);
+  let tries = 0;
+  while (decor.rocks < 1200 && tries < 30000) {
+    tries++;
+    const x = (rng() * 2 - 1) * (HALF - 0.8), z = (rng() * 2 - 1) * (HALF - 0.8);
+    if (nearTrunk(x, z, 0.6)) continue;
+    const r = 0.10 + rng() * 0.34;                        /* radius 10–44 cm */
+    dummy.position.set(x, terrainH(x, z) - r * 0.45, z);  /* partly buried */
+    dummy.rotation.set(rng() * Math.PI, rng() * Math.PI * 2, rng() * Math.PI);
+    dummy.scale.set(r * (0.85 + rng() * 0.5), r * (0.55 + rng() * 0.35), r * (0.85 + rng() * 0.5));
+    dummy.updateMatrix();
+    rocks.setMatrixAt(decor.rocks, dummy.matrix);
+    const g0 = 0.30 + rng() * 0.22;                       /* warm gray-brown stone */
+    col.setRGB(g0 * 1.10, g0 * 1.02, g0 * 0.84);
+    rocks.setColorAt(decor.rocks, col);
+    decor.rocks++;
+  }
+  rocks.count = decor.rocks;
+  rocks.instanceMatrix.needsUpdate = true;
+  if (rocks.instanceColor) rocks.instanceColor.needsUpdate = true;
+  rocks.castShadow = true;
+  world.add(rocks);
+
+  /* grass tufts: clumps of 7 slender tapered blades that splay outward —
+     3 geometry variants + per-instance rotation/scale/tint so the field
+     never looks cloned (visual only, no collision) */
+  const tuftVariants = [];
+  for (let v = 0; v < 3; v++) {
+    const verts = [];
+    for (let b = 0; b < 7; b++) {
+      const a = (b / 7) * Math.PI * 2 + rng() * 0.7;
+      const spread = 0.035 + rng() * 0.04;
+      const bx = Math.cos(a) * spread * 0.6, bz = Math.sin(a) * spread * 0.6;
+      const lean = 0.05 + rng() * 0.08;                  /* tips lean outward */
+      const h = 0.24 + rng() * 0.16;                     /* blade height 24–40 cm */
+      const w = 0.012 + rng() * 0.008;                   /* slender base width */
+      const px = -Math.sin(a) * w, pz = Math.cos(a) * w;
+      verts.push(bx - px, 0, bz - pz,  bx + px, 0, bz + pz,
+                 Math.cos(a) * (spread + lean), h, Math.sin(a) * (spread + lean));
+    }
+    const tg = new THREE.BufferGeometry();
+    tg.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    tg.computeVertexNormals();
+    tuftVariants.push(tg);
+  }
+  const tuftMat = new THREE.MeshStandardMaterial({ color: '#4e7c3a', roughness: 0.95,
+                                                   side: THREE.DoubleSide });
+  const TUFTS = 8000;
+  const tufts = [0, 1, 2].map(v => new THREE.InstancedMesh(tuftVariants[v], tuftMat, Math.ceil(TUFTS / 3)));
+  const tuftCount = [0, 0, 0];
+  tries = 0;
+  while (decor.tufts < TUFTS && tries < 150000) {
+    tries++;
+    const x = (rng() * 2 - 1) * (HALF - 0.5), z = (rng() * 2 - 1) * (HALF - 0.5);
+    if (nearTrunk(x, z, 0.25)) continue;
+    const v = decor.tufts % 3, s = 0.8 + rng() * 0.9;   /* clump scale 0.8–1.7 */
+    dummy.position.set(x, terrainH(x, z) - 0.03, z);
+    dummy.rotation.set((rng() - 0.5) * 0.14, rng() * Math.PI * 2, (rng() - 0.5) * 0.14);
+    dummy.scale.set(s, s * (0.85 + rng() * 0.4), s);
+    dummy.updateMatrix();
+    tufts[v].setMatrixAt(tuftCount[v], dummy.matrix);
+    const g1 = 0.72 + rng() * 0.5;
+    col.setRGB(g1 * 0.78, g1, g1 * 0.58);
+    tufts[v].setColorAt(tuftCount[v], col);
+    tuftCount[v]++; decor.tufts++;
+  }
+  tufts.forEach((t, v) => {
+    t.count = tuftCount[v];
+    t.instanceMatrix.needsUpdate = true;
+    if (t.instanceColor) t.instanceColor.needsUpdate = true;
+    world.add(t);
+  });
+}
+
+/* fauna — butterflies flutter in a loose ring around whoever is walking (they
+   stay at flower height among the low plants, daytime only); birds circle high
+   above the area with slow wing beats. All instanced, animated per frame,
+   deterministic seeded paths. Decorative only — no collision, no shadows. */
+const fauna = { nBirds: 7, nBfly: 14, birdPos: [], bflyPos: [], meshes: {} };
+{
+  const rng = mulberry32(20261106);
+  const dummy = new THREE.Object3D(), col = new THREE.Color();
+  const UPv = new THREE.Vector3(0, 1, 0), FWD = new THREE.Vector3(0, 0, 1);
+  const AXZx = new THREE.Vector3(1, 0, 0);
+  const _q = new THREE.Quaternion(), _d = new THREE.Vector3();
+
+  /* birds: forward-pointing cone body + two flat box wings hinged at the body */
+  const bodyG = new THREE.ConeGeometry(0.11, 0.6, 6);
+  bodyG.rotateX(Math.PI / 2);                         /* apex points forward (+z) */
+  const wingG = new THREE.BoxGeometry(0.95, 0.025, 0.34);
+  const birdMat = new THREE.MeshStandardMaterial({ color: '#3f3f47', roughness: 0.9 });
+  const imBody = new THREE.InstancedMesh(bodyG, birdMat, fauna.nBirds);
+  const imWing = new THREE.InstancedMesh(wingG, birdMat, fauna.nBirds * 2);
+  const birds = [];
+  for (let i = 0; i < fauna.nBirds; i++) {
+    birds.push({ cx: (rng() * 2 - 1) * 30, cz: (rng() * 2 - 1) * 30,
+                 R: 16 + rng() * 26, alt: 12 + rng() * 11,
+                 om: (0.09 + rng() * 0.10) * (rng() < 0.5 ? 1 : -1),
+                 ph: rng() * Math.PI * 2, flapF: 3.2 + rng() * 2.4, wob: 1.5 + rng() * 2 });
+    const g = 0.22 + rng() * 0.3;                     /* brown-grey plumage */
+    col.setRGB(g * 1.15, g, g * 0.85);
+    imBody.setColorAt(i, col); imWing.setColorAt(i * 2, col); imWing.setColorAt(i * 2 + 1, col);
+  }
+
+  /* butterflies: two small wing planes flapping fast */
+  const bfG = new THREE.PlaneGeometry(0.07, 0.05);
+  const bfMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.8, side: THREE.DoubleSide });
+  const imBfly = new THREE.InstancedMesh(bfG, bfMat, fauna.nBfly * 2);
+  const PAL = [[1.7,0.7,0.2],[1.8,1.45,0.35],[1.5,1.5,1.6],[0.55,0.9,1.8],[1.7,0.55,1.1]];
+  const bfly = [];
+  for (let i = 0; i < fauna.nBfly; i++) {
+    bfly.push({ ang: rng() * Math.PI * 2, dAng: (0.25 + rng() * 0.5) * (rng() < 0.5 ? 1 : -1),
+                rad: 3 + rng() * 8, h: 0.5 + rng() * 1.3, ph: rng() * Math.PI * 2,
+                bob: 0.18 + rng() * 0.35 });
+    const c = PAL[Math.floor(rng() * PAL.length)];
+    col.setRGB(c[0], c[1], c[2]);
+    imBfly.setColorAt(i * 2, col); imBfly.setColorAt(i * 2 + 1, col);
+  }
+
+  for (const im of [imBody, imWing, imBfly]) {
+    im.frustumCulled = false;
+    im.instanceMatrix.needsUpdate = true;
+    world.add(im);
+  }
+  fauna.meshes = { imBody, imWing, imBfly };
+
+  fauna.update = (tSec, dt) => {
+    /* birds: wide slow circles, gentle vertical wobble, wings flap */
+    for (let i = 0; i < birds.length; i++) {
+      const b = birds[i], a = b.om * tSec + b.ph, sgn = b.om > 0 ? 1 : -1;
+      const x = b.cx + Math.cos(a) * b.R, z = b.cz + Math.sin(a) * b.R;
+      const y = b.alt + Math.sin(a * 2 + b.ph) * b.wob;
+      _d.set(-Math.sin(a) * sgn, 0, Math.cos(a) * sgn);
+      dummy.position.set(x, y, z);
+      dummy.quaternion.setFromUnitVectors(FWD, _d);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      imBody.setMatrixAt(i, dummy.matrix);
+      const flap = Math.sin(tSec * b.flapF * Math.PI * 2 + b.ph) * 0.6;
+      for (let w = 0; w < 2; w++) {
+        dummy.position.set(x, y, z);
+        dummy.quaternion.setFromUnitVectors(FWD, _d);
+        dummy.rotateZ(w ? -flap : flap);
+        dummy.translateX(w ? -0.45 : 0.45);
+        dummy.updateMatrix();
+        imWing.setMatrixAt(i * 2 + w, dummy.matrix);
+      }
+      fauna.birdPos[i] = [x, y, z];
+    }
+    imBody.instanceMatrix.needsUpdate = true;
+    imWing.instanceMatrix.needsUpdate = true;
+
+    /* butterflies: keep circling loosely AROUND the walker, at herb height */
+    for (let i = 0; i < bfly.length; i++) {
+      const f = bfly[i];
+      f.ang += f.dAng * dt * (1 + 0.4 * Math.sin(tSec * 0.9 + f.ph));
+      const rad = f.rad + 2.2 * Math.sin(tSec * 0.35 + f.ph);
+      const wx = state.px + Math.cos(f.ang) * rad, wz = state.pz + Math.sin(f.ang) * rad;
+      const wy = terrainH(wx, wz) + f.h + f.bob * Math.sin(tSec * 2.1 + f.ph);
+      _d.set(-Math.sin(f.ang) * (f.dAng > 0 ? 1 : -1), 0, Math.cos(f.ang) * (f.dAng > 0 ? 1 : -1));
+      const flap = 0.9 * Math.sin(tSec * 21 + f.ph);  /* fast wingbeat */
+      for (let w = 0; w < 2; w++) {
+        dummy.position.set(wx, wy, wz);
+        /* wings flat (Rx −90°) + flap = a single rotation about the span axis,
+           then the whole butterfly turns to face its flight direction */
+        dummy.quaternion.setFromAxisAngle(UPv, -f.ang);
+        _q.setFromAxisAngle(AXZx, -Math.PI / 2 + (w ? -flap : flap));
+        dummy.quaternion.multiply(_q);
+        dummy.translateX(w ? -0.035 : 0.035);
+        dummy.updateMatrix();
+        imBfly.setMatrixAt(i * 2 + w, dummy.matrix);
+      }
+      fauna.bflyPos[i] = [wx, wy, wz];
+    }
+    imBfly.instanceMatrix.needsUpdate = true;
+  };
+}
+
+/* walking-status ring: a FULL circle in muted earth color (blends with the grass,
+   not a shiny blue marker) appears on the ground while the bow reaches the
+   engage angle — the symbol that the user is walking; raising the head away
+   from the engage angle hides the whole ring */
+const gazeRing = new THREE.Mesh(
+  new THREE.RingGeometry(0.34, 0.46, 48),
+  new THREE.MeshBasicMaterial({ color: '#4c6034', transparent: true, opacity: 0.45,
+                               side: THREE.DoubleSide, depthWrite: false, depthTest: false }));
+gazeRing.rotation.x = -Math.PI / 2;
+gazeRing.visible = false;
+scene.add(gazeRing);
+
+/* No in-scene signs or status boards — user request: the scene stays clean and
+   learners are told how to walk instead (help panel on flat screens / README).
+   ui3d invariant must stay 0 (checked by test/shots.mjs). */
+const ui3dBoards = 0;
+
+/* ============ Section 3 — modes: XR (VR→AR) or flat FPS ============ */
+function gazeCamera () {
+  return (renderer.xr.isPresenting) ? renderer.xr.getCamera() : camera;
+}
+const _v = new THREE.Vector3();
+function gazeRayHit () {
+  const cam = gazeCamera();
+  const o = cam.getWorldPosition(_v.clone());
+  const g = cam.getWorldDirection(_v.clone());      /* unit forward, world coords */
+  const bow = Math.asin(-Math.max(-1, Math.min(1, g.y))) / RAD;
+  state.bow = bow;
+  let hit = null, t = 0.4;
+  while (t < 40) {
+    const wx = o.x + g.x * t, wy = o.y + g.y * t, wz = o.z + g.z * t;
+    const lx = wx + state.px, lz = wz + state.pz;   /* world → terrain local */
+    /* terrain surface in world coords is h(x,z) - gs (world group y-offset) */
+    if (wy <= terrainH(lx, lz) - state.gs + 0.01) { hit = { x: wx, y: wy, z: wz }; break; }
+    t = t * 1.18 + 0.06;
+  }
+  return { hit, bow, gaze: g };
+}
+
+let xrKind = null;
+async function probeXR () {
+  if (!navigator.xr) return;
+  try {
+    if (await navigator.xr.isSessionSupported('immersive-vr')) xrKind = 'immersive-vr';
+    else if (await navigator.xr.isSessionSupported('immersive-ar')) xrKind = 'immersive-ar';
+  } catch (_) { xrKind = null; }
+}
+async function enterXR () {
+  if (!xrKind) return;
+  try {
+    const session = await navigator.xr.requestSession(xrKind, {
+      optionalFeatures: ['local-floor', 'local'] });
+    renderer.xr.setReferenceSpaceType('local-floor');
+    await renderer.xr.setSession(session);
+    state.mode = xrKind === 'immersive-vr' ? 'vr' : 'ar';
+    if (state.mode === 'ar' && session.environmentBlendMode && session.environmentBlendMode !== 'opaque')
+      scene.background = null;                      /* passthrough: show the real room */
+    const btn = document.getElementById('xrBtn');
+    if (btn) btn.style.display = 'none';
+    session.addEventListener('end', () => { state.mode = 'flat'; });
+  } catch (err) {
+    state.mode = 'flat';
+  }
+}
+
+/* flat-mode input: pointer-lock mouse look (desktop) + touch drag, WASD walk,
+   hold Space = try the same gaze-walk the headset uses */
+const keys = {};
+let locked = false, dragging = false, lastT = null;
+const lookSens = 0.126;   /* deg per pixel (pointer-lock mouse) */
+window.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === ' ') keys.space = true;
+  else if ('wasd'.includes(k)) keys[k] = true;
+  else return;
+  e.preventDefault();
+});
+window.addEventListener('keyup', e => {
+  const k = e.key.toLowerCase();
+  if (k === ' ') keys.space = false;
+  else if ('wasd'.includes(k)) delete keys[k];
+});
+renderer.domElement.addEventListener('click', () => {
+  if (!renderer.xr.isPresenting && !locked) {
+    try { renderer.domElement.requestPointerLock(); } catch (_) {}
+  }
+});
+document.addEventListener('pointerlockchange', () => {
+  locked = document.pointerLockElement === renderer.domElement;
+});
+window.addEventListener('mousemove', e => {
+  if (!locked && !dragging) return;
+  flatLook(-e.movementX * lookSens, -e.movementY * lookSens);
+});
+renderer.domElement.addEventListener('pointerdown', e => { dragging = true; lastT = [e.clientX, e.clientY]; });
+window.addEventListener('pointerup', () => { dragging = false; lastT = null; });
+window.addEventListener('pointermove', e => {
+  if (locked || !dragging) return;
+  if (e.pointerType === 'mouse') return;            /* mouse handled above */
+  flatLook(-(e.clientX - lastT[0]) * 0.23, -(e.clientY - lastT[1]) * 0.23);
+  lastT = [e.clientX, e.clientY];
+});
+/* state.yaw / state.pitch are DEGREES (yaw wrapped); converted at every use */
+function flatLook (dyawDeg, dpitchDeg) {
+  state.yaw = ((state.yaw + dyawDeg + 180) % 360 + 360) % 360 - 180;
+  state.pitch = Math.max(-85, Math.min(85, state.pitch + dpitchDeg));
+  camera.rotation.set(-state.pitch * RAD, state.yaw * RAD, 0);
+}
+camera.rotation.set(-state.pitch * RAD, state.yaw * RAD, 0);   /* apply ?look= start */
+
+/* ---- one loop for every mode ---- */
+/* setAnimationLoop passes an ABSOLUTE timestamp (rAF time), so dt is ours */
+let prevTime = null;
+function tick (tMs) {
+  const nowMs = (typeof tMs === 'number' && isFinite(tMs)) ? tMs : performance.now();
+  const dtWall = prevTime === null ? 0.016 : Math.max(0.001, (nowMs - prevTime) / 1000);
+  const dt = Math.min(0.05, dtWall);              /* clamped dt: walking/animal physics only */
+  prevTime = nowMs;
+  const presenting = renderer.xr.isPresenting;
+
+  /* advance the world clock (?dayspeed) on REAL wall time, so one cycle is
+     always 600 s (day 5 min + night 5 min) whatever the frame rate is. */
+  if (DAY.speed > 0) state.tod = (state.tod + dtWall * DAY.speed / 3600) % 24;
+  applyTod(state.tod);
+
+  /* flat camera always mirrors the look state (XR owns its own camera).
+     state.yaw / state.pitch are stored in DEGREES — convert at use. */
+  if (!presenting) camera.rotation.set(-state.pitch * RAD, state.yaw * RAD, 0);
+
+  const R = gazeRayHit();
+  /* full ring only while the bow reaches the engage angle (walking symbol);
+     anything shallower than engage → the whole ring disappears */
+  if (R.hit && R.bow >= WALK.engage) { gazeRing.position.set(R.hit.x, R.hit.y + 0.02, R.hit.z); gazeRing.visible = true; }
+  else gazeRing.visible = false;
+
+  const walking = presenting || (state.mode === 'flat' && (keys.space || FORCE_WALK));
+  if (walking) {
+    /* look-to-walk: speed from bow depth, heading from gaze yaw */
+    state.speed = smoothSpeed(state.speed, targetSpeed(R.bow), dt);
+    if (state.speed > 0.005) {
+      const h = headingFrom(R.gaze.x, R.gaze.z, R.bow);
+      state.lastHeading = { x: h.x, z: h.z };
+      const adv = advance(h, state.speed * dt);
+      state.pathLen += adv.moved;
+      state.px = adv.x; state.pz = adv.z;
+      if (adv.blocked) state.blockedMsg = adv.blocked;
+      else if (state.blockedMsg) state.blockedMsg = '';
+    }
+  } else if (state.mode === 'flat') {
+    /* FPS fallback: WASD relative to the view yaw */
+    state.speed = 0;
+    const fw = (keys.w ? 1 : 0) - (keys.s ? 1 : 0);
+    const st = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
+    if (fw || st) {
+      const spd = 1.15;
+      const fy = state.yaw * RAD;
+      const fx = -Math.sin(fy), fz = -Math.cos(fy);  /* view forward */
+      const rx =  Math.cos(fy), rz = -Math.sin(fy);  /* view right  */
+      const m = Math.hypot(fw, st);
+      const moved = slideMove((fx * fw + rx * st) / m * spd * dt, (fz * fw + rz * st) / m * spd * dt);
+      state.pathLen += moved;
+      if (moved > 0) state.lastHeading = { x: fx * Math.sign(fw) + rx * Math.sign(st), z: fz * Math.sign(fw) + rz * Math.sign(st) };
+    }
+  }
+
+  /* keep the ground under the feet at the floor plane (smoothed) */
+  const want = terrainH(state.px, state.pz);
+  state.gs += (want - state.gs) * Math.min(1, dt / 0.12);
+  world.position.set(-state.px, -state.gs, -state.pz);
+
+  /* fauna animates every frame (butterflies follow the walker, birds circle) */
+  fauna.update(nowMs / 1000, dt);
+
+  if (TEXT_UI && !presenting) {
+    readoutEl.textContent = [
+      'mode : ' + state.mode + (state.blockedMsg ? '  ' + state.blockedMsg : ''),
+      'time : ' + fmtTod(state.tod) + '   sun-alt ' + sunModel(state.tod).altDeg.toFixed(0) + '°',
+      'pos  : ' + state.px.toFixed(2) + ', ' + state.pz.toFixed(2) + '   ground ' + state.gs.toFixed(2),
+      'speed: ' + state.speed.toFixed(2) + ' m/s   gaze-bow ' + Math.round(state.bow) + '°   path ' + state.pathLen.toFixed(1) + ' m',
+      'slope@feet: ' + slopeDeg(state.px, state.pz).toFixed(1) + '°   trees: ' + pines.length
+    ].join('\n');
+  }
+
+  /* draw the frame (during an XR session the XR camera owns the view) */
+  renderer.render(scene, presenting ? renderer.xr.getCamera() : camera);
+}
+
+/* HUD (flat mode) + help panel — NO text on the page by default (user request):
+   both panels appear only with ?ui=1 (for lessons/debug). The XR button stays. */
+const helpEl = document.createElement('div');
+helpEl.id = 'help';
+if (TEXT_UI) {
+helpEl.innerHTML =
+  '<h1>walking_xr — เดินในพื้นที่ภูเขา (WebXR)</h1>' +
+  'ใน VR/AR: <b>มองต่ำประมาณ 20° จากขอบฟ้า</b> แล้วจะเดินไปทิศที่มอง (ตรง/ซ้าย/ขวา)' +
+  ' มองลึกขึ้น = เดินเร็วขึ้น ภูเขาโดยรอบเป็นฉากหลัง' + '<br>' +
+  'ในพื้นที่กว้าง 132×132 ม. จัดเป็นโซน: แต่ละบริเวณมีต้นไม้<b>ชนิดเดียวกัน</b>ขึ้นชิดกัน — สนหลายขนาด,' +
+  ' ต้นทรงกลมมีกิ่งก้าน, พุ่มเตี้ย, กล้วย (ลำต้นเขียว ใบยาวห้อย) และไม้ล้มลุกใบงอกจากพื้น (เดินผ่านได้)' +
+  ' — ลำต้นกันทางเดิน; ความชัน &gt;18° และขอบเขตจะกันทางเดิน (เลื่อนอ้อมได้)' + '<br>' +
+  'มี<b>ผีเสื้อ</b>บินวนรอบตัวเรา (เฉพาะกลางวัน) และ<b>นก</b>บินเป็นวงพร้อมกระพือปีกเหนือพื้นที่' + '<br>' +
+  'ดวงอาทิตย์ ดวงจันทร์ และดวงดาวเปลี่ยนทิศทาง/สีท้องฟ้าตามเวลา — รอบวันเริ่มต้นยาว 10 นาที (กลางวัน 5 นาที กลางคืน 5 นาที) นั่งรอจะเห็นมุมแสงค่อยๆ เคลื่อน; ปรับได้ใน URL: <b>?tod=ชม.(0–24)</b> และ <b>?dayspeed=ตัวคูณเวลา</b>' + '<br>' +
+  'หน้าจอนี้ (ไม่มี XR): <b>WASD</b> เดิน, เมาส์/ลาก = มอง, <b>กด Space ค้าง</b> = ทดลอง gaze-walk' + '<br>' +
+  '<span class="warn">ความปลอดภัย: เคลียร์พื้นที่ ≥2×2 ม. หรือนั่งเก้าอี้ หยุดเมื่อเวียนศีรษะ</span>';
+document.body.appendChild(helpEl);
+}
+
+const hudEl = document.createElement('div');
+hudEl.id = 'hud';
+const readoutEl = document.createElement('pre');
+readoutEl.id = 'readout';
+hudEl.appendChild(readoutEl);
+if (TEXT_UI) document.body.appendChild(hudEl);
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* debug hooks for headless verification */
+window.__app = {
+  status () {
+    const sm = sunModel(state.tod);
+    const tCount = {};
+    pines.forEach(p => tCount[p.type] = (tCount[p.type] || 0) + 1);
+    return { mode: state.mode, px: state.px, pz: state.pz, gs: state.gs, speed: state.speed,
+             bow: state.bow, path: state.pathLen, heading: state.lastHeading,
+             look: { pitch: state.pitch, yaw: state.yaw },
+             blocked: state.blockedMsg, trees: pines.length, start, ui3d: ui3dBoards,
+             half: HALF,
+             decor: { rocks: decor.rocks, tufts: decor.tufts }, ring: gazeRing.visible,
+             fauna: { birds: fauna.nBirds, butterflies: fauna.nBfly,
+                      bflyVisible: fauna.meshes.imBfly ? fauna.meshes.imBfly.visible : false,
+                      birdSample: fauna.birdPos[0] || null, bflySample: fauna.bflyPos[0] || null },
+             tod: state.tod, dayspeed: DAY.speed,
+             sun: { dir: sm.dir, alt: sm.altDeg, intensity: sun.intensity, lit: sun.visible },
+             moon: { alt: -sm.altDeg, intensity: moon.intensity, lit: moon.visible },
+             stars: { count: STARS, opacity: starsMat.opacity, rotY: stars.rotation.y },
+             sky: scene.background && scene.background.getHexString ? scene.background.getHexString() : null,
+             shadows: { enabled: renderer.shadowMap.enabled, sun: sun.visible, moon: moon.visible, mapSize: 1024 },
+             treeTypes: tCount,
+             pines: pines.map(p => ({ x: p.x, z: p.z, type: p.type, H: p.H, layers: p.layers })) };
+  },
+  setPlayer (x, z) { state.px = x; state.pz = z; state.gs = terrainH(x, z); },
+  setLook (pitchDeg, yawDeg) { state.pitch = pitchDeg; state.yaw = yawDeg; },
+  setTod (h) { state.tod = ((h % 24) + 24) % 24; applyTod(state.tod); },
+  probe (x, z) { return canOccupy(x, z); },   /* debug: collision at a point */
+  scene,                                       /* debug: the THREE scene */
+  enterXR
+};
+
+/* start: probe XR (the button asks the user before entering —
+   requestSession needs a user gesture on most browsers), then run the loop.
+   It is the ONLY text shown on the default page (user request). */
+probeXR().then(() => {
+  if (UI_ON) {
+    const back = document.createElement('a');
+    back.id = 'backIdx'; back.href = '../index.html'; back.textContent = '← index';
+    document.body.appendChild(back);
+  }
+  if (xrKind && UI_ON) {
+    const btn = document.createElement('button');
+    btn.id = 'xrBtn';
+    btn.textContent = xrKind === 'immersive-vr' ? 'เข้าโหมด VR' : 'เข้าโหมด AR';
+    btn.addEventListener('click', () => { enterXR(); });
+    document.body.appendChild(btn);
+  }
+  applyTod(state.tod);                             /* paint the sky for the start clock */
+  renderer.setAnimationLoop(tick);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,1151 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<link rel="icon" href="data:,">
+<title>PCA_XR — PCA ของข้อมูลทรงรีในสามมิติ · WebXR</title>
+<!-- ============================================================================
+  PCA_XR — สื่อการสอน WebXR: การลดมิติด้วย principal component บนข้อมูลจริง
+
+  ข้อมูล: กลุ่มจุดรูป "ทรงรี" (Gaussian ellipsoid) ที่สุ่มใหม่ทุกครั้ง
+     · ทิศทางของทรงรี = การหมุนสุ่มสม่ำเสมอ (ไม่ได้อิงแกน x,y,z)
+     · ครึ่งแกน σ₁ > σ₂ > σ₃ ต่างกัน 8 เท่าขึ้นไป → เห็นแกนยาวกับแกนสั้นชัด
+  สิ่งที่สื่อคำนวณจากข้อมูลจริง (ไม่ใช่รูปที่วาดไว้ก่อน):
+     mean x̄ → covariance C = (1/(n−1))Σ(x−x̄)(x̄−x)... → Jacobi eigen →
+     λ₁ ≥ λ₂ ≥ λ₃, v₁ ⊥ v₂ ⊥ v₃, อัตราที่อธิบายได้ λ_k/tr C
+     และจุดทุกจุดที่ "project" ลงบน v₁ / v₁∧v₂ / v₂∧v₃ / ทิศอื่น ๆ
+
+  หลักของสื่อ: ไม่มีคำอธิบาย ไม่มีประโยค ไม่มีป้ายคำ — มีเฉพาะจุด เส้น แกน
+  ตัวเลข และสัญคณิต (λ σ v₁ x̄ tr Ĉ ‖·‖ %) บนแผงตัวเลขกับการ์ดสัญลักษณ์
+  คำอธิบายทั้งหมดอยู่ใน README.md · ทุกตัวเลขในโลก 3D มาจาก tools/math_core.mjs
+  (ชุดเดียวกับที่ tools/math_check.mjs ตรวจแล้ว 1401 ข้อผ่าน) ไม่มี hardcoded ในไฟล์นี้
+
+  กระจุก default = ขยาย 2 เท่าของฉากพื้นฐาน (ตัวคูณ k = 2 = เพดาน CLUSTER_MAX)
+  seed ตัวอย่าง 20261104: กล่องที่วาด 1.59×1.57×2.53 m จุดศูนย์กลางห่าง 2.67 m จากผู้ยืน
+  ปรับด้วย ?cluster=1…2 (1 = แบบแผนเดิม) · แบบแผนเวทีอยู่ใน math_core.stageFor/STAGE_BASE
+  invariant ที่คงที่ทุกค่า k: หน้าใกล้ของกล่องอยู่ข้างผู้ยืนที่ 1.40 m (จุดทุกจุดไกลกว่านั้น)
+  + ฐานล่างกล่องกระจุกอยู่ที่ 1.00 m (ขยายขึ้นด้านบนเท่านั้น ไม่ทับการ์ดเมนู/แผงตัวเลข)
+  ราคาที่ต้องจ่ายอย่างซื่อสัตย์: จุดขอบบนสุดสูงขึ้น — วัดจริงมุมเงยไม่เกิน 35° (ขอบทฤษฎี 50.9°)
+  ────────────────────────────────────────────────────────────────────────────
+  เมนูที่ "ก้มมอง" (การ์ดสัญลักษณ์, จ้องค้าง 1.2 s = สั่งงาน)
+  แถว 1  ℝ³ ℝ² ℝ¹  = แสดงทั้งกลุ่ม / เหลือระนาบ v₁∧v₂ / เหลือเส้น v₁ เดียว  ⟳ = ข้อมูลชุดใหม่
+  แถว 2  v₂ v₃ u x y z = ทิศอื่นที่ "ลดมิติ" แบบเดียวกัน เพื่อเทียบว่า v₁ เก็บ
+         variance ได้มากที่สุดจริง (ตัวเลข % บนการ์ดคำนวณจากข้อมูลชุดเดียวกัน)
+  แถว 3  ⟲ reset · ◍ ellipsoid 2σ · ◐ จุดที่ถูกทิ้ง + เส้น drop · μ centering ·
+         n = ขนาดตัวอย่าง 300/900/2400 · ⊞ แกนดิบ x y z
+  ────────────────────────────────────────────────────────────────────────────
+  สิ่งที่จอแบนให้ไม่ได้: ตัดสินว่าจุดไหน "ห่าง" ระนาบที่ project, ว่ากลุ่มจุดหนาแน่น
+  ตรงกลางบางตรงขอบ, ว่าแกน v₁ วิ่งตามยาวทรงรีจริง ๆ หรือแค่ภาพ Projection ที่
+  บีบทุกอย่างทับกัน, ว่าการเหลือมิติเดียวทำให้กลุ่มจุดกลายเป็น "เส้น" อย่างไร
+
+  การควบคุม
+  ────────────────────────────────────────────────────────────────────────────
+  ในแว่น (immersive-vr): ก้มมองต่ำกว่าขอบฟ้า 26°…46° แล้วเดินตามทิศที่มอง
+     (เกณฑ์เดียวกับ ../walking_xr, ไม่มีจอยสติก) · จ้องการ์ดค้าง 1.2 s = สั่งงาน
+  บนจอ: ลากเมาส์/สัมผัส = หัน · Space ค้าง = gaze-walk · WASD เดิน
+        1 2 3 = ℝ³ ℝ² ℝ¹ · 4 5 6 7 8 9 = ทิศเทียบ · N ข้อมูลใหม่ · S เปลี่ยน n
+        E ellipsoid · D จุดที่ถูกทิ้ง · M centering · T แกนดิบ · R คืนท่า · H ปิด HUD (ทำงานเมื่อ ?ui=1)
+  ────────────────────────────────────────────────────────────────────────────
+  หน้าแรก (ค่า default — ไม่มี ?ui): บนจอแบนไม่มีข้อความใด ๆ บนหน้าจอเลย มีเพียง 2 ตัวควบคุม
+    ปุ่ม "เข้าโหมด VR" (หรือ "เข้าโหมด AR") มุมล่างซ้าย · ลิงก์ "← index" กลับหน้าสารบัญ มุมบนซ้าย
+    แผงตัวเลขในโลก 3D (Section 5) ถูกซ่อนบนจอแบน — ในแว่นแผงและการ์ดแสดงตามเดิมเสมอ
+  ?ui=1 = คืนข้อความทั้งหมดบนจอแบน: แถบคีย์ด้านบน + HUD ล่าง + แผงตัวเลขในโลก 3D
+  ?ui=0 = ปิดแถบคีย์/HUD เหมือนเดิม และปิดลิงก์ ← index ด้วย
+  ────────────────────────────────────────────────────────────────────────────
+  จุด กระจุก แกน v₁ v₂ v₃ ลูกศรชื่อแกน x y z σ₁ σ₂ และขีด 1σ 2σ = ส่วนของพล็อต แสดงเสมอทุกโหมด
+  URL: ?seed= &n=0|1|2 &mode=1|2|3 &basis=pc2|pc3|rnd1|rawx|rawy|rawz &ell=1 &drop=0
+       &center=0 &triad=1 &look=pitch,yaw &ui=0|1 &walk=1
+  test hook: window.__pca (Section 9 ท้ายไฟล์)
+============================================================================ -->
+<style>
+:root { --fg:#e8f4ff; --dim:#9fb3c8; --acc:#4cc9f0; --warn:#ffb347; --x:#ff6b6b; --y:#7ee08a; --z:#5fb0ff; --bg:#0b1220; }
+* { box-sizing:border-box; }
+html, body { margin:0; padding:0; background:var(--bg); color:var(--fg);
+  font-family: system-ui, "Noto Sans Thai", "Sarabun", "Leelawadee UI", sans-serif;
+  height:100%; overflow:hidden; touch-action:none; -webkit-user-select:none; user-select:none; }
+.mono { font-family: ui-monospace, "DejaVu Sans Mono", "Noto Sans Mono", monospace; font-variant-numeric: tabular-nums; }
+#keys { display:none;                       /* default ของหน้าแรก: ไม่มีข้อความ (JS เปิดเมื่อ ?ui=1) */
+  position:fixed; left:50%; transform:translateX(-50%); top:10px; z-index:11;
+  background:#0b1220d8; border:1px solid #22384d; border-radius:6px; padding:5px 12px;
+  font-size:12.5px; letter-spacing:.02em; color:#cfe8ff; max-width:94vw; }
+#hud { display:none;                        /* เช่นเดียวกับ #keys — เปิดเฉพาะเมื่อ ?ui=1 */
+  position:fixed; left:0; bottom:0; z-index:10; width:min(64vw,560px);
+  background:#0b1220e8; border-top:1px solid #22384d; padding:7px 11px; }
+#readout { font-size:12.5px; white-space:pre; margin:0; color:#cfe8ff; line-height:1.5; }
+/* unified first-page UI (same position in all 5 media) */
+#backIdx { position:fixed; left:14px; top:14px; z-index:40;
+  font:600 14px/1.2 system-ui,"Noto Sans Thai",sans-serif; padding:9px 14px;
+  border:1px solid #4cc9f0; background:#0b1220cc; color:#e8f4ff; border-radius:8px; text-decoration:none; }
+#enterXR, #xrBtn { position:fixed; left:14px; bottom:14px; z-index:40;
+  font:600 16px/1.2 system-ui,"Noto Sans Thai",sans-serif; padding:10px 18px;
+  border:1px solid #4cc9f0; background:#12314a; color:#e8f4ff; border-radius:8px; cursor:pointer; }
+#enterXR { display:none; }            /* ซ่อนจนกว่า probe จะพบ xrKind (พฤติกรรมเดิมของปุ่ม) */
+canvas { position:fixed; inset:0; display:block; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./three.module.js" } }
+</script>
+</head>
+<body>
+<!-- หน้าแรก (ค่า default): บนจอแบนไม่มีข้อความเลย — มีเพียง 2 ตัวควบคุม: ปุ่ม "เข้าโหมด VR" (ล่างซ้าย)
+     กับลิงก์ "← index" (บนซ้าย, ซ่อนเมื่อ ?ui=0). ในแว่น: ไม่มีข้อความ มีแต่ตัวเลข/สัญคณิตบนแผง
+     และการ์ดสัญลักษณ์ตามเดิม. ?ui=1 = คืนแถบคีย์ + HUD + แผงตัวเลข บนจอแบน (ใช้ตอนทดสอบบนจอแบน) -->
+<div id="keys" class="mono">
+  ลากเมาส์ = มอง · W A S D = เดิน · Space + ก้ม = เดินตามทิศมอง · 1 2 3 = ℝ³ ℝ² ℝ¹ ·
+  4 5 6 7 8 9 = ทิศเทียบ · N = ข้อมูลใหม่ · S = เปลี่ยน n · E ellipsoid · D จุดที่ถูกทิ้ง ·
+  M = centering · T = แกนดิบ · R = คืนท่า · H ปิด HUD · ในแว่น: ก้มแล้วจ้องการ์ดค้าง 1.2 วิ
+</div>
+<div id="hud"><pre id="readout" class="mono"></pre></div>
+<a id="backIdx" href="../index.html">← index</a>
+<button id="enterXR">เข้าโหมด VR</button>
+<script type="module">
+import * as THREE from 'three';
+import * as M from './tools/math_core.mjs';
+
+/* ╔══════════════════════════════════════════════════════════════════════════╗
+   ║ Section 1 — ค่าคงที่ของการแสดงผล (คณิตทั้งหมดอยู่ใน tools/math_core)      ║
+   ╚══════════════════════════════════════════════════════════════════════════╝ */
+const RAD = Math.PI / 180, TAU = Math.PI * 2;
+const EYE = 1.6;                       // ความสูงตาผู้เรียน (m) — ตรงกับที่ math_check ใช้ตรวจ
+const WORLD_HALF = 8;                  // เดินได้รอบเวที ±8 m (ห้ามเข้าบริเวณแสดงกระจุก)
+const DOT_BASE = [0.020, 0.0125];     // ขนาดจุดพื้นฐาน: ที่ฉายแล้ว / จุดเดิมที่ถูกทิ้ง (m ที่ระยะ 1 m)
+const DOT_CORE = 2.6;                  // ระบายสีจุดตาม Mahalanobis radius r/2.6 (แกนกลางสว่าง)
+const TICK_SIGMAS = [1, 2];            // ขีดบนแกน PC = σ, 2σ (จาก λ จริง)
+const SIG_LAB_MIN = 0.07;              // m จาก x̄: ต่ำกว่านี้ขีด σ ใกล้เกินจนป้ายทับกันเอง (ขีดยังวาด)
+const AXIS_LAB_MIN = 0.30;           // m จาก x̄: รัศมีขั้นต่ำของป้ายชื่อแกน (แกนสั้นมากป้ายจะไม่ทับกันตรงกลาง)
+const HEAD_R = 0.036, HEAD_L = 0.105, SHAFT_R = 0.0105;
+
+/* gaze dwell — เหมือน ../line_integral_xr และ ../parametric_curves_xr */
+const DWELL_MS = 1200, COOLDOWN_MS = 900, CARD_CONE = 6.0 * RAD;
+const CARD_ROWS = [
+  { pitch: -22, az: [-49, -25, 25, 49] },            // แถว 1: ℝ³ ℝ² ℝ¹ ⟳
+  { pitch: -38, az: [-58, -44, -31, 31, 44, 58] },  // แถว 2: ทิศเทียบ v₂ v₃ u x y z
+  { pitch: -52, az: [-54, -39, -25, 25, 39, 54] },  // แถว 3: ⟲ ◍ ◐ μ n ⊞
+];
+const CARD_MIN_H = 0.30;
+const CARD_HW = 0.31, CARD_HH = 0.215, CARD_DIST = 3.4;
+const rowDist = (pitchDeg) => {
+  const p = Math.abs(pitchDeg) * RAD, kMax = (EYE - CARD_MIN_H) / (Math.sin(p) + (CARD_HH / CARD_DIST) * Math.cos(p));
+  return Math.min(CARD_DIST, kMax);
+};
+/* แผงตัวเลขอยู่ต่ำกว่ากระจุก (ขอบบน −22°) — เวทีของกระจุกกินพื้นที่ ±0.55 m ที่ 2 m
+   ซึ่งต่ำกว่า −15° จากสายตา จึงไม่ทับแผง และการ์ดทั้งสามแถวยังอยู่ต่ำกว่าสายตา */
+const CONSOLE = { az: 0, pitch: -28, dist: 2.05, w: 0.984, h: 0.4374 };
+const WALK = { engage: 26, full: 46, maxSpeed: 2.3, maxAccel: 2.5, edgeClear: 1.0, deep: 46 };
+
+const COL = {
+  fg: '#eaf6ff', dim: '#8fa6bd', acc: '#4cc9f0', hot: '#ffe08a',
+  pc: ['#ffb347', '#4cc9f0', '#ff8fa3'],           // v₁ v₂ v₃
+  raw: ['#ff6b6b', '#7ee08a', '#5fb0ff'],          // แกนดิบ x y z
+  drop: '#6f879e', plane: '#4cc9f0', ell: '#9fd0ff', mean: '#ffe08a',
+};
+
+const Q = new URLSearchParams(location.search);
+const UI_ON = Q.get('ui') !== '0';                          /* ?ui=0: ไม่มีลิงก์ ← index (help/HUD ถูกปิดเหมือนเดิม) */
+const TEXT_UI = Q.get('ui') === '1';                        /* ?ui=1: แถบคีย์ + HUD + แผงตัวเลขในโลก 3D บนจอแบน */
+const FORCE_WALK = Q.get('walk') === '1';
+
+const clamp = (x, lo, hi) => x < lo ? lo : (x > hi ? hi : x);
+const clampInt = (v, lo, hi) => (typeof v === 'number' && isFinite(v)) ? Math.round(clamp(v, lo, hi)) : null;
+const approach = (v, t, m) => v < t ? Math.min(t, v + m) : Math.max(t, v - m);
+const wrapPi = (a) => { while (a > Math.PI) a -= TAU; while (a < -Math.PI) a += TAU; return a; };
+const fN = (x, d = 4) => (typeof x === 'number' && isFinite(x)) ? x.toFixed(d) : '   —  ';
+const fP = (x, d = 1) => (typeof x === 'number' && isFinite(x)) ? (100 * x).toFixed(d) : '—';
+const fVec = (v, d = 3) => '(' + v.map(x => (x >= 0 ? ' ' : '') + x.toFixed(d)).join(', ') + ')';
+
+/* ขนาดกระจุกที่วาด = ตัวคูณ k ของแบบแผนเวที · default ×2 ตามที่ผู้ใช้ขอ
+   ?cluster=1 = แบบแผนเดิม (0.80×0.79×1.27 m ที่ระยะศูนย์กลาง ~2.0 m) · ?cluster=1.5 · ?cluster=2
+   math_core.stageFor/stagePlan รักษาสอง invariant ทุกค่า k: (1) จุดที่ใกล้ตาที่สุดอยู่ไกล
+   เป็นระยะด้านข้าง ≥ 1.40 m เสมอ (2) ฐานล่างของกล่องกระจุกอยู่ที่ 1.00 m เสมอ (กระจุกโตขึ้น
+   ข้างบนเท่านั้น ไม่ทับการ์ดเมนู/แผงตัวเลข) และขยายทุกเพดานพร้อมกัน = รูปทรงข้อมูลเดิม */
+const CLUSTER_K = isFinite(parseFloat(Q.get('cluster'))) ? clamp(parseFloat(Q.get('cluster')), 1, M.CLUSTER_MAX) : M.CLUSTER_MAX;
+const SPEC = M.stageFor(CLUSTER_K);
+
+/* ขนาดจุดที่ renderer วาดจริง = ค่าพื้นฐาน × DOT_SCALE × (ระยะเวทีจริง / 2.00 m)
+   ตัวคูณท้ายคือการชดเชย: เวทียิ่งถอยออกตามกระจุกที่ใหญ่ขึ้น จุดยิ่งไกลตา — คูณตามระยะ
+   แล้ว "มุมบนจอ" ของจุดเท่าเดิมเสมอ (ขนาดเชิงมุม = ค่า DOT_SCALE ที่ระยะมาตรฐาน 2 m)
+   default DOT_SCALE = ×2 ตามที่ผู้ใช้ขอ (จุด 2 ซม. → 4 ซม. ที่ระยะ 1 m) · ปรับเองจาก URL:
+   ?dots=1 = ขนาดพื้นฐาน · ?dots=1.5 · ?dots=3 · ค่าที่ไม่มี/เกินขอบถูก clamp 0.25…4 */
+const DOT_SCALE = clamp(isFinite(parseFloat(Q.get('dots'))) ? parseFloat(Q.get('dots')) : 2, 0.25, 4);
+const dotSize = (i) => DOT_BASE[i] * DOT_SCALE * ((D && D.stage ? D.stage.dist : M.STAGE_BASE.dist) / M.STAGE_BASE.dist);
+
+/* ╔══════════════════════════════════════════════════════════════════════════╗
+   ║ Section 2 — ข้อมูลจริงชุดปัจจุบัน + basis ที่กำลังฉาย                      ║
+   ╚══════════════════════════════════════════════════════════════════════════╝ */
+const S = {
+  seed: Number.isFinite(parseFloat(Q.get('seed'))) ? Math.trunc(parseFloat(Q.get('seed'))) : (Date.now() & 0x7fffffff),
+  nIdx: [0, 1, 2].includes(parseInt(Q.get('n'), 10)) ? parseInt(Q.get('n'), 10) : 1,
+  modeK: [1, 2, 3].includes(parseInt(Q.get('mode'), 10)) ? parseInt(Q.get('mode'), 10) : 3,
+  altKey: (Q.get('basis') || null),  // null = โหมด PCA (1/2/3), ไม่งั้น = key ของทิศเทียบ (?basis=)
+  ell: Q.get('ell') === '1', drop: Q.get('drop') !== '0', center: Q.get('center') === '1', triad: Q.get('triad') !== '0',
+  px: 0, pz: 0, speed: 0, yaw: 0, bodyYaw: 0, bow: 0, moveVec: null,
+  hoverKey: null, dwellKey: null, dwellT: 0, lastAct: 0, clock: 0, seq: 0,
+};
+let D = null;                          // {cloud, pca, stage, alts, altOf, prj, basis, glyphs, kind}
+let rebuilt = true;
+
+const nNow = () => M.N_STEPS[S.nIdx];
+/** สร้างข้อมูลใหม่ → PCA จริง → แบบแผนเวที → เตรียมทุก basis ที่เมนูมี */
+function buildData () {
+  const cloud = M.makeCloud(S.seed, nNow());
+  const pca = M.pcaOf(cloud);
+  const stage = M.stagePlan(pca, SPEC);
+  const alts = M.altBases(pca);
+  const altOf = Object.create(null);
+  for (const a of alts) altOf[a.key] = a;
+  D = { cloud, pca, stage, alts, altOf, prj: null, basis: null, glyphs: null, kind: null, axisHalf: null };
+  if (stageRing) stageRing.position.z = -stage.dist;      // วงแหวนบนพื้น = ระยะจริงของกระจุกชุดนี้
+  S.seq++;
+  rebuilt = true;
+  applyBasis();
+}
+/** basis ที่ใช้จริงตอนนี้ + projection ของทุกจุดบน basis นั้น (math_core ทั้งชุด) */
+function applyBasis () {
+  const P = D.pca;
+  let basis, glyphs, kind;
+  if (S.altKey && D.altOf[S.altKey]) {
+    basis = D.altOf[S.altKey].basis; glyphs = [D.altOf[S.altKey].glyph]; kind = D.altOf[S.altKey].kind;
+  } else {
+    const k = clampInt(S.modeK, 1, 3) || 3; S.modeK = k;
+    basis = P.vectors.slice(0, k); glyphs = basis.map((_, i) => 'v' + '₁₂₃'[i]); kind = 'pca';
+  }
+  const prj = M.projectBasis(P, basis);
+  const axisHalf = basis.map((_, j) => prj.coords.reduce((w, c) => Math.max(w, Math.abs(c[j])), 0));
+  D.basis = basis; D.glyphs = glyphs; D.kind = kind; D.prj = prj; D.axisHalf = axisHalf;
+  rebuilt = true;
+}
+function keptOf (basis) { return M.projectBasis(D.pca, basis).keptFrac; }
+
+/* จุดข้อมูล (after centering) → ตำแหน่งจริงในโลก three.js
+   map = data x → +X (ขวา), data y → −Z (ลึกเข้า), data z → +Y (ขึ้น) = M.worldOf */
+const toW = (p) => {
+  const w = M.worldOf(M.vSub(p, D.pca.mu));
+  return new THREE.Vector3(w[0] * D.stage.scale + D.stage.center[0], w[1] * D.stage.scale + D.stage.center[1], w[2] * D.stage.scale + D.stage.center[2]);
+};
+/* ทิศในหน่วยข้อมูล → ทิศในโลก three.js: ใช้ map เดียวกับ toW **ครั้งเดียว**
+   (เคยเขียนผิดเป็น (w[0], w[2], -w[1]) ซ้ำ = worldOf สองครั้ง = หมุน 180° รอบแกน X
+   ลูกศรสองหัวไม่หายแต่แผ่นระนาบ/ ellipsoid เอียงออกจากข้อมูลที่วาดจริง) */
+const dirW = (v) => { const w = M.worldOf(v); return new THREE.Vector3(w[0], w[1], w[2]).normalize(); };
+const stageCenterV = () => new THREE.Vector3(D.stage.center[0], D.stage.center[1], D.stage.center[2]);
+
+/* ╔══════════════════════════════════════════════════════════════════════════╗
+   ║ Section 3 — โลก three.js                                                  ║
+   ╚══════════════════════════════════════════════════════════════════════════╝ */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#0b1220');
+scene.fog = new THREE.FogExp2('#0b1220', 0.014);
+
+const rig = new THREE.Group(); scene.add(rig);          // จุดที่ยืน
+const world = new THREE.Group(); rig.add(world);        // เลื่อนกลับ = เดิน
+const body = new THREE.Group(); rig.add(body);          // การ์ด+คอนโซลตามลำตัว
+body.position.set(0, EYE, 0);                           // เมนูอยู่กับระดับตา: placeFacing วัดมุมจาก origin นี้
+const camera = new THREE.PerspectiveCamera(64, innerWidth / Math.max(1, innerHeight), 0.05, 200);
+rig.add(camera); camera.position.set(0, EYE, 0);
+
+const _v = new THREE.Vector3(), _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _ray = new THREE.Raycaster();
+
+/* ภาพจุด = วงกลมนุ่ม (map สีขาว × สีของจุดแต่ละจุด) */
+const dotTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d'), r = c.getContext('2d').createRadialGradient(32, 32, 0, 32, 32, 32);
+  r.addColorStop(0, '#ffffff'); r.addColorStop(0.55, '#ffffff'); r.addColorStop(1, '#ffffff00');
+  g.fillStyle = r; g.fillRect(0, 0, 64, 64);
+  const t = new THREE.CanvasTexture(c); t.anisotropy = 4; return t;
+})();
+
+{
+  const grid = new THREE.GridHelper(2 * WORLD_HALF, 2 * WORLD_HALF, '#1d3450', '#14243a');
+  grid.position.y = 0.004; world.add(grid);
+}
+/* marker บนพื้นที่ตรงกับตำแหน่งกระจุกปัจจุบัน (บอกผู้เรียนว่ากระจุกอยู่ตรงหน้าแค่ไหน) */
+let stageRing = null;
+{
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.34, 0.37, 48),
+    new THREE.MeshBasicMaterial({ color: '#22405f', transparent: true, opacity: 0.75, side: THREE.DoubleSide }));
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.01; ring.position.z = -M.STAGE_BASE.dist; world.add(ring); stageRing = ring;   // buildData เลื่อนไปที่ระยะจริงของข้อมูล
+}
+
+function glyphSprite (txt, color = COL.fg, px = 120, wpx = 256, hpx = 96, scale = 0.20) {
+  const c = document.createElement('canvas'); c.width = wpx; c.height = hpx;
+  const g = c.getContext('2d');
+  g.font = `700 ${px}px ui-monospace, "DejaVu Sans Mono", monospace`;
+  g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = color;
+  g.fillText(txt, wpx / 2, hpx / 2);
+  const tex = new THREE.CanvasTexture(c); tex.anisotropy = 4;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+  sp.scale.set(scale, scale * hpx / wpx, 1);
+  return sp;
+}
+function disposeGroup (g) {
+  if (!g) return;
+  g.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    const ms = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
+    for (const m of ms) { if (m.map && m.map !== dotTex) m.map.dispose(); m.dispose(); }
+  });
+  world.remove(g);
+}
+
+/* ╔══════════════════════════════════════════════════════════════════════════╗
+   ║ Section 4 — วาดกระจุกจุด แกน eigenvector และการฉายลดมิติ                  ║
+   ╚══════════════════════════════════════════════════════════════════════════╝ */
+let stageGroup = null;
+const cA = new THREE.Color(), cB = new THREE.Color();
+/** สีจุด = ความสว่างตาม Mahalanobis radius r = √Σ(c_k/σ_k)² (แกนกลางสว่าง ขอบมืด)
+    ใช้ชุดสีเดียวกันกับทุกโหมด → จุดเดิมใน ℝ³ กับจุดที่ฉายแล้ว "คือจุดเดียวกัน" เห็นได้ */
+function pointColor (q, out) {
+  const P = D.pca; let r2 = 0;
+  for (let k = 0; k < 3; k++) { const c = M.vDot(q, P.vectors[k]) / Math.max(1e-12, P.sigma[k]); r2 += c * c; }
+  const t = 1 - clamp(Math.sqrt(r2) / DOT_CORE, 0, 1);
+  out.set('#24405e').lerp(cA.set('#dbeeff'), Math.pow(t, 0.75));
+  return out;
+}
+function pointMesh (positions, colors, size, opacity) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  const mat = new THREE.PointsMaterial({ size, map: dotTex, vertexColors: true, transparent: true, opacity, depthWrite: false, sizeAttenuation: true });
+  const pts = new THREE.Points(geo, mat);
+  pts.userData.kind = 'points'; pts.userData.n = positions.length / 3;
+  return pts;
+}
+
+function buildStage () {
+  disposeGroup(stageGroup);
+  stageGroup = new THREE.Group(); world.add(stageGroup);
+  const P = D.pca, ST = D.stage, C = stageCenterV();
+  const showProjection = D.prj.k < 3;
+
+  /* (1) จุดเดิมทั้งกลุ่ม — ในโหมดลดมิติวาดเป็น "จุดจาง" พร้อมเส้น drop ไปยังภาพฉาย */
+  const posRaw = [], colRaw = [];
+  for (const p of D.cloud.points) {
+    const w = toW(p); posRaw.push(w.x, w.y, w.z);
+    pointColor(M.vSub(p, P.mu), cB); colRaw.push(cB.r, cB.g, cB.b);
+  }
+  if (!showProjection || S.drop) stageGroup.add(pointMesh(posRaw, colRaw, dotSize(showProjection ? 1 : 0), showProjection ? 0.42 : 1));
+
+  /* (2) จุดที่ฉายแล้วบน basis ที่เลือก = "หน้าตาข้อมูลในมิติที่ลดลง" */
+  if (showProjection) {
+    const posP = [], colP = [], dropSegs = [];
+    for (let i = 0; i < D.cloud.points.length; i++) {
+      const a = toW(D.cloud.points[i]), b = toW(D.prj.projs[i]);
+      posP.push(b.x, b.y, b.z);
+      pointColor(M.vSub(D.cloud.points[i], P.mu), cB); colP.push(cB.r, cB.g, cB.b);
+      if (S.drop) dropSegs.push(a.x, a.y, a.z, b.x, b.y, b.z);
+    }
+    const pm = pointMesh(posP, colP, dotSize(0), 1); pm.userData.kind = 'projected'; stageGroup.add(pm);
+    if (S.drop && dropSegs.length) {
+      const g2 = new THREE.BufferGeometry();
+      g2.setAttribute('position', new THREE.Float32BufferAttribute(dropSegs, 3));
+      const ln = new THREE.LineSegments(g2, new THREE.LineBasicMaterial({ color: COL.drop, transparent: true, opacity: 0.30 }));
+      ln.userData.kind = 'drops'; stageGroup.add(ln);
+    }
+    /* แผ่นระนาบบาง ๆ เมื่อเหลือ 2 มิติ = ขอบเขตของมิติที่เก็บไว้
+       สร้างจาก **จุดมุมในพิกัดโลก** ของ span{basis₀, basis₁} โดยตรง (ไม่มี quaternion):
+       แผ่นที่ renderer วาดจึงเป็นสี่เหลี่ยมที่ครอบจุดที่ถูกฉายจริงพอดี ตรวจสอบจาก geometry ได้ */
+    if (D.prj.k === 2) {
+      const u = dirW(D.basis[0]), v = dirW(D.basis[1]);
+      const hu = D.axisHalf[0] * ST.scale, hv = D.axisHalf[1] * ST.scale;
+      const cor = (su, sv) => C.clone().addScaledVector(u, su * hu).addScaledVector(v, sv * hv);
+      const cc = [cor(-1, -1), cor(1, -1), cor(1, 1), cor(-1, 1)];
+      const flat = (list) => list.flatMap((p) => [p.x, p.y, p.z]);
+      const pl = new THREE.Mesh(new THREE.BufferGeometry().setAttribute('position',
+        new THREE.Float32BufferAttribute(flat([cc[0], cc[1], cc[2], cc[0], cc[2], cc[3]]), 3)),
+        new THREE.MeshBasicMaterial({ color: COL.plane, transparent: true, opacity: 0.10, side: THREE.DoubleSide, depthWrite: false }));
+      pl.userData.kind = 'plane'; pl.userData.half = [hu, hv];
+      pl.userData.dirs = [[u.x, u.y, u.z], [v.x, v.y, v.z]];
+      stageGroup.add(pl);
+      const outline = new THREE.LineLoop(new THREE.BufferGeometry().setAttribute('position',
+        new THREE.Float32BufferAttribute(flat(cc), 3)),
+        new THREE.LineBasicMaterial({ color: COL.plane, transparent: true, opacity: 0.55 }));
+      outline.userData.kind = 'planeOutline'; stageGroup.add(outline);
+    }
+  }
+
+  /* (3) ellipsoid ที่ครอบข้อมูลจริง: ครึ่งแกน 2σ จาก λ (stagePlan.ellipsoidSemi) */
+  if (S.ell) {
+    const sp = new THREE.Mesh(new THREE.SphereGeometry(1, 40, 22),
+      new THREE.MeshBasicMaterial({ color: COL.ell, wireframe: true, transparent: true, opacity: 0.30, depthWrite: false }));
+    _m.makeBasis(dirW(P.vectors[0]), dirW(P.vectors[1]), dirW(P.vectors[2]));
+    sp.quaternion.setFromRotationMatrix(_m);
+    sp.scale.set(ST.ellipsoidSemi[0] * ST.scale, ST.ellipsoidSemi[1] * ST.scale, ST.ellipsoidSemi[2] * ST.scale);
+    sp.position.copy(C); sp.userData.kind = 'ellipsoid'; sp.userData.semi = ST.ellipsoidSemi.map(v => v * ST.scale);
+    stageGroup.add(sp);
+  }
+
+  /* (4) แกนของ basis ที่กำลังใช้ = eigenvector/direction ที่คำนวณจากข้อมูลจริง */
+  for (let j = 0; j < D.basis.length; j++) axisArrow(D.basis[j], D.glyphs[j], D.axisHalf[j] * ST.scale, D.kind === 'pca' ? P.sigma[j] : null, j, C);
+
+  /* (5) แกนที่ "ถูกทิ้ง" วาดเป็นเส้นประจาง พร้อมป้าย → เห็นชัดว่าทิ้งอะไรไป */
+  const dropped = P.vectors.filter((v) => D.basis.every((b) => Math.abs(M.vDot(v, b)) < 1e-9));
+  for (const v of dropped) dashedAxis(v, 'v' + '₁₂₃'[P.vectors.indexOf(v)], P.half[P.vectors.indexOf(v)] * ST.scale, C);
+
+  /* (6) แกนดิบ x y z (เทียบว่าทิศที่ PCA หา ไม่ได้อิงแกนของข้อมูล) */
+  if (S.triad) for (let i = 0; i < 3; i++) rawAxis(i, C);
+
+  /* (7) mean: จุดกลางที่ถูกย้ายมา origin + (โหมด μ) กลุ่มจุดก่อน centering */
+  const mk = new THREE.Mesh(new THREE.OctahedronGeometry(0.045, 0), new THREE.MeshBasicMaterial({ color: COL.mean }));
+  mk.position.copy(C); mk.userData.kind = 'mean'; stageGroup.add(mk);
+  const ml = glyphSprite('x̄', COL.mean, 150); ml.position.copy(C).add(new THREE.Vector3(0, 0.11, 0)); stageGroup.add(ml);
+  if (S.center) {
+    const gm = M.worldOf(P.mu), off = new THREE.Vector3(gm[0] * ST.scale, gm[1] * ST.scale, gm[2] * ST.scale);
+    const ghostPos = [], ghostCol = [];
+    for (const p of D.cloud.points) { const w = toW(p).add(off); ghostPos.push(w.x, w.y, w.z); }
+    for (let i = 0; i < ghostPos.length / 3; i++) ghostCol.push(0.24, 0.33, 0.44);
+    stageGroup.add(pointMesh(ghostPos, ghostCol, 0.010, 0.5));
+    const dg = new THREE.BufferGeometry().setAttribute('position',
+      new THREE.Float32BufferAttribute([C.x, C.y, C.z, C.x + off.x, C.y + off.y, C.z + off.z], 3));
+    const dl = new THREE.LineSegments(dg, new THREE.LineDashedMaterial({ color: COL.mean, transparent: true, opacity: 0.8, dashSize: 0.05, gapSize: 0.035 }));
+    dl.computeLineDistances(); dl.userData.kind = 'muVec'; stageGroup.add(dl);
+    const lab = glyphSprite('μ', COL.mean, 150); lab.position.copy(C).add(off.multiplyScalar(0.55)).add(new THREE.Vector3(0, 0.09, 0));
+    stageGroup.add(lab);
+  }
+}
+function axisArrow (vData, glyph, len, sigma, idx, C) {
+  const col = COL.pc[idx % 3], dir = dirW(vData);
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(SHAFT_R, SHAFT_R, Math.max(0.05, len), 10),
+    new THREE.MeshBasicMaterial({ color: col }));
+  _q.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir); shaft.quaternion.copy(_q);
+  shaft.position.copy(C).addScaledVector(dir, len / 2); shaft.userData.kind = 'axis';
+  shaft.userData.glyph = glyph; shaft.userData.axisIndex = idx; shaft.userData.wantDir = [dir.x, dir.y, dir.z];
+  stageGroup.add(shaft);
+  const head = new THREE.Mesh(new THREE.ConeGeometry(HEAD_R, HEAD_L, 14), new THREE.MeshBasicMaterial({ color: col }));
+  head.quaternion.copy(_q); head.position.copy(C).addScaledVector(dir, len - HEAD_L / 2);
+  head.userData.kind = 'axisHead'; head.userData.tip = C.clone().addScaledVector(dir, len);
+  stageGroup.add(head);
+  const shaft2 = new THREE.Mesh(new THREE.CylinderGeometry(SHAFT_R, SHAFT_R, len, 10), new THREE.MeshBasicMaterial({ color: col }));
+  _q.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().negate()); shaft2.quaternion.copy(_q);
+  shaft2.position.copy(C).addScaledVector(dir, -len / 2); stageGroup.add(shaft2);
+  const head2 = new THREE.Mesh(new THREE.ConeGeometry(HEAD_R, HEAD_L, 14), new THREE.MeshBasicMaterial({ color: col }));
+  head2.quaternion.copy(_q); head2.position.copy(C).addScaledVector(dir, -len + HEAD_L / 2);
+  head2.userData.kind = 'axisHead'; head2.userData.tip = C.clone().addScaledVector(dir, -len);
+  stageGroup.add(head2);
+  if (sigma && sigma > 0) {                          // ขีดที่ ±σ, ±2σ — มาตราส่วนของข้อมูลจริง
+    const perp = new THREE.Vector3(0, 1, 0).cross(dir).normalize();
+    if (!Number.isFinite(perp.x) || perp.lengthSq() < 1e-6) perp.set(1, 0, 0);
+    const segs = [];
+    for (const sgn of [-1, 1]) for (const k of TICK_SIGMAS) {
+      const at = C.clone().addScaledVector(dir, sgn * k * sigma * D.stage.scale);
+      const t = perp.clone().multiplyScalar(0.045);
+      segs.push(at.x - t.x, at.y - t.y, at.z - t.z, at.x + t.x, at.y + t.y, at.z + t.z);
+    }
+    const tk = new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(segs, 3)),
+      new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.85 }));
+    tk.userData.kind = 'ticks'; stageGroup.add(tk);
+    for (const k of TICK_SIGMAS) for (const sgn of [-1, 1]) {
+      /* แกนที่สั้นมาก (λ₃ ≈ λ₁/80) มีขีด σ อยู่ใกล้จุดที่แกนทั้งสามมาบรรจบกัน
+         ป้ายของมันจะทับกันเองและทับ x̄ → วาดแค่ขีด σ ค่าเต็มของทุก σ อยู่บนแผงตัวเลข */
+      const at = sgn * k * sigma * D.stage.scale;
+      if (Math.abs(at) < SIG_LAB_MIN) continue;
+      const lab = glyphSprite((k === 1 ? 'σ' : k + 'σ') + '₁₂₃'[idx], col, 120, 200, 90, 0.13);
+      lab.position.copy(C).addScaledVector(dir, at).add(new THREE.Vector3(0, 0.075, 0));
+      stageGroup.add(lab);
+    }
+  }
+  /* แกนที่สั้นมาก (λ₃ ≈ λ₁/70) มีปลายอยู่ใกล้ x̄ มาก → เลื่อนป้ายไปรัศมีขั้นต่ำและย่อขนาด
+     ไม่งั้นป้ายของแกนทั้งสามมาทับกันตรงกลางฉาก ค่า λ σ ของทุกแกนมีอยู่บนแผงตัวเลขอยู่แล้ว */
+  const labR = Math.max(len + 0.10, AXIS_LAB_MIN);
+  const lab = glyphSprite(glyph, col, 190, 220, 100, len < 0.12 ? 0.18 : 0.26);
+  lab.position.copy(C).addScaledVector(dir, labR);
+  stageGroup.add(lab);
+}
+function dashedAxis (vData, glyph, len, C) {
+  const dir = dirW(vData);
+  const g = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(
+    [-len, 0, 0, len, 0, 0], 3));
+  const ln = new THREE.LineSegments(g, new THREE.LineDashedMaterial({ color: COL.dim, transparent: true, opacity: 0.55, dashSize: 0.06, gapSize: 0.05 }));
+  ln.quaternion.setFromUnitVectors(new THREE.Vector3(1, 0, 0), dir);
+  ln.position.copy(C); ln.computeLineDistances(); ln.userData.kind = 'droppedAxis';
+  stageGroup.add(ln);
+  const lab = glyphSprite(glyph, COL.dim, 150, 200, 90, 0.15);
+  lab.position.copy(C).addScaledVector(dir, Math.max(len + 0.07, AXIS_LAB_MIN)); stageGroup.add(lab);
+}
+function rawAxis (i, C) {
+  const e = M.RAW_DIRS[i], dir = dirW(e);
+  const len = Math.max(Math.abs(D.pca.bbox[i]), Math.abs(D.pca.bbox[3 + i])) * D.stage.scale;
+  const g = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([-len, 0, 0, len, 0, 0], 3));
+  const ln = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: COL.raw[i], transparent: true, opacity: 0.45 }));
+  ln.quaternion.setFromUnitVectors(new THREE.Vector3(1, 0, 0), dir);
+  ln.position.copy(C); ln.userData.kind = 'rawAxis';
+  stageGroup.add(ln);
+  const lab = glyphSprite('xyz'[i], COL.raw[i], 130, 160, 80, 0.13);
+  lab.position.copy(C).addScaledVector(dir, len + 0.05); stageGroup.add(lab);
+}
+
+/* ╔══════════════════════════════════════════════════════════════════════════╗
+   ║ Section 5 — แผงตัวเลขในโลก (สัญคณิต + ตัวเลขเท่านั้น ไม่มีคำ)             ║
+   ╚══════════════════════════════════════════════════════════════════════════╝ */
+const CVW = 1440, CVH = 640;
+const PF = (px, w = 700) => `${w} ${px}px ui-monospace, "DejaVu Sans Mono", "Noto Sans Mono", monospace`;
+let conCanvas = null, conCtx = null, conTex = null, conMesh = null;
+
+function placeFacing (mesh, azDeg, pitchDeg, dist) {
+  const az = azDeg * RAD, pi = pitchDeg * RAD;
+  mesh.position.set(Math.sin(az) * Math.cos(pi) * dist, Math.sin(pi) * dist, -Math.cos(az) * Math.cos(pi) * dist);
+  mesh.rotation.order = 'YXZ'; mesh.rotation.set(pi, -az, 0);
+}
+/* ─ gate ของข้อความในโลก (แบบเดียวกับอีก 4 สื่อ): แผงตัวเลข (λ σ v %, Ĉ, เอกลักษณ์)
+   แสดงเมื่ออยู่ใน XR session ที่กำลัง presentation หรือเมื่อ ?ui=1 บนจอแบน —
+   ทุกบรรทัดที่วาดแผงยังทำงานตามเดิม gate เฉพาะ .visible;
+   จุด กระจุก แกน v₁v₂v₃ ลูกศรชื่อแกน x y z σ₁σ₂ และขีด 1σ 2σ ไม่ถูก gate (เป็นส่วนของพล็อต) ─ */
+const sceneTextOn = () => renderer.xr.isPresenting || TEXT_UI;
+function syncPanelVisible () { if (conMesh) conMesh.visible = sceneTextOn(); }
+function ensureConsole () {
+  if (conMesh) return;
+  conCanvas = document.createElement('canvas'); conCanvas.width = CVW; conCanvas.height = CVH;
+  conCtx = conCanvas.getContext('2d');
+  conTex = new THREE.CanvasTexture(conCanvas); conTex.anisotropy = 8;
+  conMesh = new THREE.Mesh(new THREE.PlaneGeometry(CONSOLE.w, CONSOLE.h), new THREE.MeshBasicMaterial({ map: conTex }));
+  placeFacing(conMesh, CONSOLE.az, CONSOLE.pitch, CONSOLE.dist);
+  conMesh.visible = sceneTextOn();                /* ค่าเริ่มต้นของหน้าแรก: ไม่มีแผงบนจอแบน */
+  body.add(conMesh);
+}
+const bar = (x, y, w, h, frac, color) => {
+  conCtx.fillStyle = '#132133'; conCtx.fillRect(x, y, w, h);
+  conCtx.fillStyle = color; conCtx.fillRect(x, y, w * clamp(frac, 0, 1), h);
+  conCtx.strokeStyle = '#2a4763'; conCtx.lineWidth = 2; conCtx.strokeRect(x, y, w, h);
+};
+
+function drawConsole () {
+  const g = conCtx, P = D.pca, ST = D.stage, W = CVW, H = CVH;
+  g.fillStyle = '#0a1524'; g.fillRect(0, 0, W, H);
+  g.strokeStyle = '#1d3049'; g.lineWidth = 3; g.strokeRect(1.5, 1.5, W - 3, H - 3);
+  g.textBaseline = 'top'; g.textAlign = 'left';
+
+  /* แถบหัวข้อ: ชุดข้อมูล + สิ่งที่สื่อทำ */
+  g.font = PF(24, 800); g.fillStyle = COL.fg;
+  g.fillText('seed ' + P.seed + '   n = ' + P.n + '   x̄ = ' + fVec(P.mu, 3), 14, 12);
+  g.textAlign = 'right'; g.fillStyle = COL.acc;
+  g.fillText('dim = ' + D.prj.k + '   basis = { ' + D.glyphs.join(', ') + ' }', W - 14, 12);
+  g.textAlign = 'left';
+
+  /* ตาราง eigen: λ σ % + องค์ประกอบของ v (ตัวเลขจาก Jacobi จริง) */
+  let y = 52;
+  for (let k = 0; k < 3; k++) {
+    const on = D.basis.some((b) => Math.abs(M.vDot(b, P.vectors[k])) > 1 - 1e-6);
+    g.font = PF(26, 800); g.fillStyle = on ? COL.pc[k] : '#6d8299';
+    g.fillText('λ' + '₁₂₃'[k] + ' = ' + fN(P.values[k], 4) + '    σ' + '₁₂₃'[k] + ' = √λ = ' + fN(P.sigma[k], 4), 14, y);
+    g.fillText(fP(P.explained[k], 1) + '%', 640, y);
+    bar(720, y + 2, 300, 22, P.explained[k], on ? COL.pc[k] : '#3c5875');
+    g.font = PF(20, 700); g.fillStyle = on ? COL.fg : '#5d7288';
+    g.fillText('v' + '₁₂₃'[k] + ' = ' + fVec(P.vectors[k], 4) + '   v' + '₁₂₃'[k] + 'ᵀĈv' + '₁₂₃'[k] + ' = ' + fN(P.varOf(k), 4), 14, y + 34);
+    y += 66;
+  }
+
+  /* เอกลักษณ์ที่ตรวจได้ในเครื่อง (tr = Σλ, det = λ₁λ₂λ₃, char poly) */
+  g.font = PF(20, 700); g.fillStyle = COL.dim;
+  g.fillText('Ĉ (ข้อมูลชุดนี้, 1/(n−1) Σ q qᵀ)   tr Ĉ = ' + fN(P.trace, 4), 14, y);
+  y += 26;
+  g.fillText('Σλ = ' + fN(P.values.reduce((s, x) => s + x, 0), 4) + '   det Ĉ = ' + fN(P.det, 5) + '   Πλ = ' + fN(P.values[0] * P.values[1] * P.values[2], 5), 14, y);
+  y += 26;
+  g.fillText('χ(t) = t³ ' + (P.charPoly.c2 >= 0 ? '+' : '−') + ' ' + Math.abs(P.charPoly.c2).toFixed(4) + 't² ' + (P.charPoly.c1 >= 0 ? '+' : '−') + ' ' +
+    Math.abs(P.charPoly.c1).toFixed(4) + 't ' + (P.charPoly.c0 >= 0 ? '+' : '−') + ' ' + Math.abs(P.charPoly.c0).toFixed(5) + '   sweeps = ' + P.sweeps +
+  '   max‖Ĉv−λv‖ = ' + P.residuals.reduce((w, r) => Math.max(w, r), 0).toExponential(2), 14, y);
+  y += 30;
+
+  /* Ĉ ที่คำนวณจากข้อมูลชุดนี้ (9 ตัว) */
+  g.font = PF(20, 700); g.fillStyle = '#a8c4dd';
+  for (let i = 0; i < 3; i++) {
+    let s = 'Ĉ' + '₁₂₃'[i] + ' = ';
+    for (let j = 0; j < 3; j++) s += (P.C[i][j] >= 0 ? ' ' : '') + P.C[i][j].toFixed(3) + (j < 2 ? ',' : '');
+    g.fillText(s, 14, y + i * 24);
+  }
+
+  /* แถวขวา: ตารางเทียบว่าทิศไหนเก็บ variance ได้เท่าใด (bar chart, ไม่มีคำ) */
+  const opts = [{ gl: 'v₁', b: [P.vectors[0]] },
+    ...D.alts.filter(a => a.kind === 'pca' && a.basis.length === 1).map(a => ({ gl: a.glyph, b: a.basis })),
+    ...D.alts.filter(a => a.kind === 'raw').map(a => ({ gl: a.glyph, b: a.basis })),
+    ...D.alts.filter(a => a.kind === 'rand').map(a => ({ gl: a.glyph, b: a.basis }))];
+  g.font = PF(22, 800); g.fillStyle = COL.fg; g.textAlign = 'left';
+  g.fillText('vᵀĈv / tr Ĉ', 1050, 52);
+  let yy = 84;
+  for (const o of opts) {
+    const fr = keptOf(o.b);
+    const on = o.b.length === D.basis.length && o.b.every((v, i) => Math.abs(M.vDot(v, D.basis[i])) > 1 - 1e-6);
+    g.font = PF(22, 800); g.fillStyle = on ? COL.hot : '#9db3c9';
+    g.fillText(o.gl, 1050, yy);
+    bar(1105, yy + 2, 200, 20, fr, on ? COL.hot : '#3c5875');
+    g.fillText(fP(fr, 1) + '%', 1318, yy);
+    yy += 34;
+  }
+  /* 2 มิติ: เปรียบระนาบที่เก็บมากสุด กับระนาบที่เก็บน้อยสุด */
+  const pl12 = keptOf([P.vectors[0], P.vectors[1]]), pl23 = keptOf([P.vectors[1], P.vectors[2]]);
+  g.font = PF(22, 800); g.fillStyle = '#9db3c9';
+  g.fillText('v₁∧v₂', 1050, yy); bar(1105, yy + 2, 200, 20, pl12, '#3c5875'); g.fillText(fP(pl12, 1) + '%', 1318, yy); yy += 34;
+  g.fillText('v₂∧v₃', 1050, yy); bar(1105, yy + 2, 200, 20, pl23, '#3c5875'); g.fillText(fP(pl23, 1) + '%', 1318, yy);
+
+  /* แถบล่าง 3 บรรทัด: ตัวเลขของสิ่งที่กำลังฉายอยู่บนจอ + เอกลักษณ์ที่เครื่องตรวจได้เอง
+     (Var(residual) = tr Ĉ − Σ vᵀĈv) · ทุกบรรทัดยาวไม่เกินความกว้างแผง (1440 px) */
+  const R = D.prj;
+  const keptDir = D.basis.map((b) => M.dirVar(P.C, b));                 // vⱼᵀĈvⱼ ของทิศที่ใช้อยู่จริง
+  const coordGap = R.coordVar.reduce((w, cv, j) => Math.max(w, Math.abs(cv - keptDir[j])), 0);
+  g.font = PF(20, 700); g.fillStyle = COL.dim;
+  g.fillText('Var(vⱼᵀx) = ' + R.coordVar.map(v => v.toFixed(4)).join(', ') + '   vⱼᵀĈvⱼ = ' + keptDir.map(v => v.toFixed(4)).join(', ') +
+    '   max|gap| = ' + coordGap.toExponential(2), 14, H - 118);
+  g.font = PF(21, 800); g.fillStyle = COL.hot;
+  g.fillText('dim ' + D.prj.k + '  kept ' + fP(R.keptFrac, 2) + '%  dropped ' + fP(R.droppedFrac, 2) + '%  ' +
+    '√Var(residual) = ' + fN(R.rmseResidual, 4) + '  max‖x−πx‖ = ' + fN(R.maxResidual, 4), 14, H - 62);
+  g.font = PF(19, 700); g.fillStyle = COL.dim;
+  g.fillText('Var(residual) + Σⱼ vⱼᵀĈvⱼ = ' + fN(R.varResidual + R.keptVar, 4) + '   tr Ĉ = ' + fN(P.trace, 4) +
+    '   Σ‖x−x̄‖²/(n−1) = ' + fN(R.sumSqSig / Math.max(1, P.n - 1), 4) + '   |gap| = ' + R.identityGap.toExponential(2), 14, H - 34);
+}
+
+/* ╔══════════════════════════════════════════════════════════════════════════╗
+   ║ Section 6 — การ์ดสัญลักษณ์ + gaze dwell                                  ║
+   ╚══════════════════════════════════════════════════════════════════════════╝ */
+let cardGroup = null; const cards = [];
+function newCardCanvas () { const c = document.createElement('canvas'); c.width = 256; c.height = 176; return c; }
+
+/* ภาพย่อบนการ์ด 1: กลุ่มจุดทรงรี + ภาพฉาย (วาดจาก λ/v จริงของข้อมูลชุดนี้) */
+function drawCloudMini (g, box, k) {
+  const P = D.pca, { x0, y0, w, h } = box, N = 260, pts = [];
+  const rand = M.rng((P.seed ^ 0x1a2b3c) >>> 0);
+  for (let i = 0; i < N; i++) {
+    const q = [0, 0, 0];
+    for (let m = 0; m < 3; m++) {
+      const c = M.randnFactory(rand)() * P.sigma[m];
+      if (m >= k) continue;                                    // ฉายแล้ว = ทิ้งองค์ประกอบนั้น
+      q[0] += c * P.vectors[m][0]; q[1] += c * P.vectors[m][1]; q[2] += c * P.vectors[m][2];
+    }
+    pts.push(q);
+  }
+  const proj = (q) => [q[0] * 0.86 - q[1] * 0.42, -(q[2] * 0.80 + (q[0] * 0.30 + q[1] * 0.30))];
+  let loX = 1e9, hiX = -1e9, loY = 1e9, hiY = -1e9;
+  const pr = pts.map(proj);
+  for (const [a, b] of pr) { loX = Math.min(loX, a); hiX = Math.max(hiX, a); loY = Math.min(loY, b); hiY = Math.max(hiY, b); }
+  const s = Math.min((w - 10) / Math.max(1e-6, hiX - loX), (h - 10) / Math.max(1e-6, hiY - loY));
+  const cx = (loX + hiX) / 2, cy = (loY + hiY) / 2;
+  g.fillStyle = '#7fb6e8';
+  for (const [a, b] of pr) g.fillRect(x0 + w / 2 + (a - cx) * s - 1, y0 + h / 2 + (b - cy) * s - 1, 2.4, 2.4);
+  g.strokeStyle = COL.pc[0]; g.lineWidth = 2.2; g.beginPath();
+  const ax = P.vectors[0]; const a1 = proj(ax.map(v => v * P.half[0] * 0.9)), a2 = proj(ax.map(v => -v * P.half[0] * 0.9));
+  g.moveTo(x0 + w / 2 + (a1[0] - cx) * s, y0 + h / 2 + (a1[1] - cy) * s);
+  g.lineTo(x0 + w / 2 + (a2[0] - cx) * s, y0 + h / 2 + (a2[1] - cy) * s); g.stroke();
+}
+function drawCardFace (cd) {
+  const g = cd.canvas.getContext('2d');
+  g.clearRect(0, 0, 256, 176);
+  g.fillStyle = 'rgba(10,18,28,0.92)'; g.fillRect(0, 0, 256, 176);
+  g.strokeStyle = cd.hot ? COL.acc : '#22384d'; g.lineWidth = cd.hot ? 6 : 3; g.strokeRect(3, 3, 250, 170);
+  if (cd.kind === 'mode') drawCloudMini(g, { x0: 8, y0: 26, w: 240, h: 142 }, cd.k);
+  else {
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.font = '700 62px ui-monospace, "DejaVu Sans Mono", monospace'; g.fillStyle = COL.fg;
+    g.fillText(cd.glyph, 128, 74);
+    if (cd.sub) { g.font = '700 22px ui-monospace, "DejaVu Sans Mono", monospace'; g.fillStyle = COL.dim; g.fillText(cd.sub, 128, 138); }
+    g.textAlign = 'left'; g.textBaseline = 'top';
+  }
+  g.font = '700 24px ui-monospace, "DejaVu Sans Mono", monospace';
+  g.fillStyle = cd.kind === 'mode' ? COL.acc : (cd.kind === 'alt' ? COL.fg : '#7f93a8');
+  g.fillText(cd.badge, 12, 6);
+  if (cd.sub && (cd.kind === 'mode' || cd.kind === 'alt')) {
+    g.font = '700 15px ui-monospace, "DejaVu Sans Mono", monospace'; g.fillStyle = cd.sel ? COL.hot : COL.dim;
+    g.textAlign = 'right'; g.fillText(cd.sub, 244, 8); g.textAlign = 'left';
+  }
+  if (cd.progress > 0) {
+    g.strokeStyle = COL.acc; g.lineWidth = 8;
+    g.beginPath(); g.arc(232, 22, 15, -Math.PI / 2, -Math.PI / 2 + TAU * cd.progress); g.stroke();
+  }
+  cd.tex.needsUpdate = true;
+}
+function makeCard (def) {
+  const canvas = newCardCanvas(), tex = new THREE.CanvasTexture(canvas); tex.anisotropy = 4;
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(CARD_HW * 2, CARD_HH * 2), new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
+  const row = CARD_ROWS[def.row], dist = rowDist(row.pitch), k = dist / CARD_DIST;
+  const cd = Object.assign({ mesh, canvas, tex, progress: 0, hot: false, sel: false, k }, def);
+  placeFacing(mesh, row.az[def.col], row.pitch, dist);
+  mesh.scale.set(k, k, 1);
+  mesh.userData.card = cd; cardGroup.add(mesh); cards.push(cd);
+  drawCardFace(cd); return cd;
+}
+const currentSelKey = () => S.altKey ? 'alt:' + S.altKey : 'mode:' + S.modeK;
+function buildCards () {
+  if (cardGroup) body.remove(cardGroup);
+  cardGroup = new THREE.Group(); body.add(cardGroup);
+  cards.length = 0;
+  const P = D.pca, sel = currentSelKey();
+  for (let k = 3; k >= 1; k--) {
+    const idx = 3 - k;
+    makeCard({
+      row: 0, col: idx, key: 'mode:' + k, kind: 'mode', k, badge: 'ℝ' + '³²¹'[idx],
+      glyph: '³²¹'[idx], sub: fP(keptOf(P.vectors.slice(0, k)), 1) + '%', sel: sel === 'mode:' + k,
+    });
+  }
+  makeCard({ row: 0, col: 3, key: 'act:reseed', kind: 'util', glyph: '⟳', badge: '·', sub: 'seed → ' + ((S.seed + 1) & 0x7fffffff) });
+
+  const picks = ['pc2', 'pc3', 'rnd1', 'rawx', 'rawy', 'rawz'];
+  picks.forEach((key, i) => {
+    const a = D.altOf[key]; if (!a) return;
+    makeCard({
+      row: 1, col: i, key: 'alt:' + key, kind: 'alt', glyph: a.glyph, badge: a.kind === 'raw' ? '≠' : (a.kind === 'rand' ? '?' : 'PC'),
+      sub: fP(keptOf(a.basis), 1) + '%', sel: sel === 'alt:' + key,
+    });
+  });
+
+  const util = [
+    { key: 'act:pose', glyph: '⟲', sub: 'yaw=0' },
+    { key: 'act:ell', glyph: '◍', sub: S.ell ? '2σ ●' : '2σ ○' },
+    { key: 'act:drop', glyph: '◐', sub: S.drop ? '‖x−πx‖ ●' : '○' },
+    { key: 'act:center', glyph: 'μ', sub: '‖μ‖=' + M.vLen(P.mu).toFixed(2) },
+    { key: 'act:n', glyph: 'n', sub: P.n + ' → ' + M.N_STEPS[(S.nIdx + 1) % 3] },
+    { key: 'act:triad', glyph: '⊞', sub: S.triad ? 'x y z ●' : '○' },
+  ];
+  util.forEach((u, i) => makeCard({ row: 2, col: i, key: u.key, kind: 'util', badge: '·', ...u }));
+}
+function refreshCards () { if (cardGroup) { buildCards(); } }
+
+function setMode (k) { const n = clampInt(k, 1, 3); if (!n) return; S.modeK = n; S.altKey = null; applyBasis(); refreshCards(); }
+function setAlt (key) { if (!D.altOf[key]) return; S.altKey = key; applyBasis(); refreshCards(); }
+function setSeed (seed) {
+  const v = Number(seed); if (!Number.isFinite(v)) return;
+  S.seed = Math.trunc(v) >>> 0; S.altKey = null; buildData(); buildStage(); rebuilt = false; refreshCards();
+}
+function reseed () { setSeed((S.seed + 1) & 0x7fffffff); }
+function cycleN () { S.nIdx = (S.nIdx + 1) % M.N_STEPS.length; buildData(); buildStage(); rebuilt = false; refreshCards(); }
+function toggleKey (key) {
+  if (key === 'act:ell') S.ell = !S.ell;
+  else if (key === 'act:drop') S.drop = !S.drop;
+  else if (key === 'act:center') S.center = !S.center;
+  else if (key === 'act:triad') S.triad = !S.triad;
+  else if (key === 'act:pose') { S.px = 0; S.pz = 0; S.speed = 0; S.yaw = 0; S.bodyYaw = 0; lookPitch = -6 * RAD; lookYaw = 0; }
+  buildStage(); refreshCards();
+}
+function act (key) {
+  S.lastAct = performance.now();
+  if (key.startsWith('mode:')) return setMode(parseInt(key.slice(5), 10));
+  if (key.startsWith('alt:')) return setAlt(key.slice(4));
+  if (key === 'act:reseed') return reseed();
+  if (key === 'act:n') return cycleN();
+  if (key.startsWith('act:')) return toggleKey(key);
+}
+
+function updateCards (dt, dir, camPos) {
+  let hover = null, best = 1e9;
+  for (const cd of cards) {
+    const wp = cd.mesh.getWorldPosition(_v.clone());
+    const ang = Math.acos(clamp(wp.sub(camPos).normalize().dot(dir), -1, 1));
+    if (ang < CARD_CONE && ang < best) { best = ang; hover = cd; }
+  }
+  for (const cd of cards) {
+    const hot = cd === hover, pr = hot ? clamp(S.dwellT / (DWELL_MS / 1000), 0, 1) : 0;
+    if (cd.hot !== hot || Math.abs(cd.progress - pr) > 0.02) {
+      cd.hot = hot; cd.progress = pr;
+      const s = (cd.k || 1) * (hot ? 1.14 : 1);
+      cd.mesh.scale.set(s, s, 1);
+      drawCardFace(cd);
+    }
+  }
+  S.hoverKey = hover ? hover.key : null;
+  if (hover) {
+    if (S.dwellKey !== hover.key) { S.dwellKey = hover.key; S.dwellT = 0; }
+    S.dwellT += dt;
+    if (S.dwellT * 1000 >= DWELL_MS && performance.now() - S.lastAct > COOLDOWN_MS) { S.dwellT = 0; act(hover.key); }
+  } else { S.dwellKey = null; S.dwellT = 0; }
+}
+
+/* ╔══════════════════════════════════════════════════════════════════════════╗
+   ║ Section 7 — เดินด้วย gaze (เกณฑ์เดียวกับ ../walking_xr)                   ║
+   ╚══════════════════════════════════════════════════════════════════════════╝ */
+const stageClearR = () => 0.55 + D.stage.radiusWorld;
+const inStageClear = (x, z) => Math.hypot(x, z + D.stage.dist) > stageClearR();
+const fieldLim = () => WORLD_HALF - 0.4;
+const inField = (x, z) => Math.abs(x) <= fieldLim() && Math.abs(z) <= fieldLim() && inStageClear(x, z);
+function stepTo (nx, nz) {
+  if (inField(nx, nz)) { S.px = nx; S.pz = nz; return; }
+  const lim = fieldLim();
+  let tx = clamp(nx, -lim, lim), tz = clamp(nz, -lim, lim);
+  const d = Math.hypot(tx, tz + D.stage.dist) || 1, r = stageClearR();
+  if (d < r) { const f = r / d; tx *= f; tz = (tz + D.stage.dist) * f - D.stage.dist; }
+  if (Math.abs(tx) > lim || Math.abs(tz) > lim) { S.speed = 0; return; }
+  S.px = tx; S.pz = tz; S.speed = 0;
+}
+function walkControl (dt, presenting) {
+  const d = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  S.yaw = Math.atan2(-d.x, -d.z);
+  S.bow = -Math.asin(clamp(d.y, -1, 1)) / RAD;
+  const cp = camera.getWorldPosition(_v.clone());
+  _ray.set(cp, d); _ray.far = CONSOLE.dist + 0.4;
+  let atPanel = false;
+  if (conMesh && conMesh.visible) {            /* แผงที่ถูกซ่อน (หน้าแรกจอแบน) ต้องไม่บังการเดิน: raycaster ของ three ไม่เช็ก visible */
+    conMesh.updateMatrixWorld();
+    const hit = _ray.intersectObject(conMesh)[0];
+    if (hit) { const q = conMesh.worldToLocal(hit.point.clone()); atPanel = Math.abs(q.x) < 0.4 * CONSOLE.w && Math.abs(q.y) < 0.4 * CONSOLE.h; }
+  }
+  const engaged = (FORCE_WALK || spaceHeld || presenting) && S.bow >= WALK.engage && S.bow <= WALK.deep && !S.hoverKey && !atPanel;
+  if (!engaged && !anyKeyMove()) S.speed = approach(S.speed, 0, WALK.maxAccel * dt);
+  let want = 0;
+  if (engaged) want = WALK.maxSpeed * clamp((S.bow - WALK.engage) / (WALK.full - WALK.engage), 0.12, 1);
+  if (!presenting && !spaceHeld && (keys.w || keys.a || keys.s || keys.d)) {
+    const st = (keys.d ? 1 : 0) - (keys.a ? 1 : 0), fw = (keys.w ? 1 : 0) - (keys.s ? 1 : 0);
+    const fx = -Math.sin(S.yaw), fz = -Math.cos(S.yaw), rx = -fz, rz = fx, n = Math.hypot(st, fw);
+    S.moveVec = [(fx * fw + rx * st) / n, (fz * fw + rz * st) / n];
+    want = WALK.maxSpeed;
+  } else S.moveVec = null;
+  S.speed = approach(S.speed, want, WALK.maxAccel * dt);
+  if (S.speed > 1e-6) {
+    const hx = S.moveVec ? S.moveVec[0] : -Math.sin(S.yaw), hz = S.moveVec ? S.moveVec[1] : -Math.cos(S.yaw);
+    const n = Math.hypot(hx, hz) || 1;
+    stepTo(S.px + hx / n * S.speed * dt, S.pz + hz / n * S.speed * dt);
+  }
+  const dy = wrapPi(S.yaw - S.bodyYaw);
+  if (Math.abs(dy) > 6 * RAD) S.bodyYaw += clamp(dy, -1.7 * dt, 1.7 * dt);
+}
+
+const keys = Object.create(null);
+let spaceHeld = false, dragPrev = null;
+let lookPitch = Q.has('look') ? parseFloat(Q.get('look').split(',')[0]) : -6 * RAD;
+let lookYaw = Q.has('look') ? parseFloat(Q.get('look').split(',')[1]) : 0;
+const canvasEl = renderer.domElement;
+canvasEl.addEventListener('pointerdown', (e) => { dragPrev = { x: e.clientX, y: e.clientY }; canvasEl.setPointerCapture?.(e.pointerId); });
+canvasEl.addEventListener('pointermove', (e) => {
+  if (!dragPrev || renderer.xr.isPresenting) return;
+  lookYaw -= (e.clientX - dragPrev.x) * 0.0032; lookPitch = clamp(lookPitch - (e.clientY - dragPrev.y) * 0.0028, -1.35, 1.25);
+  dragPrev = { x: e.clientX, y: e.clientY };
+});
+addEventListener('pointerup', () => { dragPrev = null; });
+addEventListener('wheel', (e) => { lookPitch = clamp(lookPitch - e.deltaY * 0.0007, -1.35, 1.25); }, { passive: true });
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / Math.max(1, innerHeight); camera.updateProjectionMatrix();
+});
+addEventListener('keydown', (e) => {
+  const k = (e.key || '').toLowerCase();
+  if (k === ' ') { spaceHeld = true; e.preventDefault(); return; }
+  if (k === 'arrowleft') { lookYaw += 0.12; return; }
+  if (k === 'arrowright') { lookYaw -= 0.12; return; }
+  if (k === 'arrowup') { lookPitch = clamp(lookPitch + 0.08, -1.35, 1.25); return; }
+  if (k === 'arrowdown') { lookPitch = clamp(lookPitch - 0.08, -1.35, 1.25); return; }
+  if (k >= '1' && k <= '3') return setMode(parseInt(k, 10));
+  if (k >= '4' && k <= '9') return setAlt(['pc2', 'pc3', 'rnd1', 'rawx', 'rawy', 'rawz'][parseInt(k, 10) - 4]);
+  if (k === 'n') return reseed();
+  if (k === 's' && e.shiftKey) { cycleN(); return; }
+  if (k === 'e') return toggleKey('act:ell');
+  if (k === 'd') return toggleKey('act:drop');
+  if (k === 'm') return toggleKey('act:center');
+  if (k === 't') return toggleKey('act:triad');
+  if (k === 'r') return toggleKey('act:pose');
+  if (k === 'h') { if (TEXT_UI) { hudBox.style.display = hudBox.style.display === 'none' ? 'block' : 'none'; keysBox.style.display = hudBox.style.display; } return; }
+  if (k === 'w' || k === 'a' || k === 's' || k === 'd') { keys[k] = true; e.preventDefault(); }
+});
+addEventListener('keyup', (e) => {
+  const k = (e.key || '').toLowerCase();
+  if (k === ' ') spaceHeld = false;
+  if (k === 'w' || k === 'a' || k === 's' || k === 'd') keys[k] = false;
+});
+const anyKeyMove = () => !!(keys.w || keys.a || keys.s || keys.d);
+
+const xrBtn = document.getElementById('enterXR');
+const backIdx = document.getElementById('backIdx');
+let xrKind = null;
+(async () => {
+  if (!('xr' in navigator) || !navigator.xr.isSessionSupported) return;
+  try {
+    if (await navigator.xr.isSessionSupported('immersive-vr')) xrKind = 'immersive-vr';
+    else if (await navigator.xr.isSessionSupported('immersive-ar')) xrKind = 'immersive-ar';
+  } catch (e) { xrKind = null; }
+  if (xrKind) { xrBtn.style.display = 'block'; xrBtn.textContent = xrKind === 'immersive-ar' ? 'เข้าโหมด AR' : 'เข้าโหมด VR'; }
+})();
+/* unified first-page UI: ขณะที่ XR session กำลัง presentation — ซ่อนตัวควบคุม DOM ทั้งสอง
+   และแผงตัวเลขในโลกแสดงเสมอ (เมื่อออกจากแว่นกลับสู่ gate เดิม: ?ui=1 เท่านั้น) */
+renderer.xr.addEventListener('sessionstart', () => {
+  xrBtn.style.display = 'none'; if (backIdx) backIdx.style.display = 'none'; syncPanelVisible();
+});
+renderer.xr.addEventListener('sessionend', () => {
+  if (xrKind) xrBtn.style.display = 'block';
+  if (backIdx && UI_ON) backIdx.style.display = 'block';
+  syncPanelVisible();
+});
+xrBtn.addEventListener('click', async () => {
+  if (!xrKind) return;
+  try {
+    const session = await navigator.xr.requestSession(xrKind, {
+      optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking', 'dom-overlay'],
+    });
+    renderer.xr.setReferenceSpaceType('local-floor');
+    await renderer.xr.setSession(session);
+    xrBtn.style.display = 'none';
+    session.addEventListener('end', () => { xrBtn.style.display = 'block'; });
+  } catch (err) { console.error('XR session', err); }
+});
+
+/* ข้อความบนจอแบน: เปิดเมื่อ ?ui=1 เท่านั้น — หน้าแรกค่า default ไม่มีข้อความเลย (CSS ซ่อนไว้แล้ว)
+   (ในแว่นไม่มีข้อความบน DOM อยู่แล้ว: มีแต่แผงตัวเลขกับการ์ดสัญลักษณ์ในโลก) */
+const hudBox = document.getElementById('hud'), readout = document.getElementById('readout');
+const keysBox = document.getElementById('keys');
+if (TEXT_UI) { hudBox.style.display = 'block'; keysBox.style.display = 'block'; }
+if (backIdx && !UI_ON) backIdx.style.display = 'none';   /* ?ui=0: ไม่แสดงลิงก์ ← index */
+function hudText () {
+  const P = D.pca, R = D.prj, ST = D.stage;
+  return [
+    'x̄ = ' + fVec(P.mu, 4) + '   n = ' + P.n + '   seed = ' + P.seed + '   Ĉ = tr ' + fN(P.trace, 4) + ' det ' + fN(P.det, 5),
+    'λ = ' + P.values.map(v => fN(v, 4)).join('  ') + '   σ = ' + P.sigma.map(v => fN(v, 4)).join('  ') + '   อธิบายได้ = ' + P.explained.map(v => fP(v, 2) + '%').join(' / '),
+    'v₁ = ' + fVec(P.vectors[0], 4) + '   v₂ = ' + fVec(P.vectors[1], 4) + '   v₃ = ' + fVec(P.vectors[2], 4),
+    'basis ตอนนี้ = { ' + D.glyphs.join(', ') + ' }  dim = ' + R.k + '  kept = ' + fP(R.keptFrac, 2) + '%  dropped = ' + fP(R.droppedFrac, 2) + '%  rmse(residual) = ' + fN(R.rmseResidual, 4) + '  max‖x−πx‖ = ' + fN(R.maxResidual, 4),
+    'เอกลักษณ์: Var(residual)+ΣvᵀĈv = ' + fN(R.varResidual + R.keptVar, 4) + ' = tr Ĉ ' + (R.identityGap < 1e-9 ? '✓' : '✗ ' + R.identityGap.toExponential(2)) +
+    '   ‖Ĉv−λv‖max = ' + P.residuals.reduce((w, r) => Math.max(w, r), 0).toExponential(2) + '   sweeps = ' + P.sweeps,
+    'เวที: scale ' + fN(ST.scale, 5) + ' m/หน่วย · แกนยาวที่วาด ' + fN(ST.drawnLong, 3) + ' m · สูง ' + fN(ST.drawnVert, 3) + ' m · ระยะ ' + fN(D.stage.dist, 2) + ' m · มุมกิน ' + fN(ST.angularDeg, 1) + '°',
+    'position: ' + S.px.toFixed(2) + ', ' + S.pz.toFixed(2) + ' m   bow = ' + S.bow.toFixed(0) + '°   speed = ' + S.speed.toFixed(2) + ' m/s   hover = ' + (S.hoverKey || '—'),
+  ].join('\n');
+}
+
+/* ╔══════════════════════════════════════════════════════════════════════════╗
+   ║ Section 8 — วนหลัก                                                       ║
+   ╚══════════════════════════════════════════════════════════════════════════╝ */
+let lastT = 0, frames = 0, panelT = 0, hudT = 0;
+function tick (tMs) {
+  const now = performance.now();
+  const dt = lastT ? Math.min(0.05, (now - lastT) / 1000) : 0.016;
+  lastT = now; S.clock += dt; frames++;
+
+  const presenting = renderer.xr.isPresenting;
+  if (!presenting) { camera.rotation.set(lookPitch, lookYaw, 0); camera.position.set(0, EYE, 0); }
+
+  walkControl(dt, presenting);
+  rig.position.set(S.px, 0, S.pz);
+  world.position.set(-S.px, 0, -S.pz);
+  body.rotation.y = S.bodyYaw;
+
+  if (rebuilt) { buildStage(); rebuilt = false; }
+
+  const camObj = presenting ? renderer.xr.getCamera() : camera;
+  const camPos = camObj.getWorldPosition(new THREE.Vector3());
+  const gaze = new THREE.Vector3(0, 0, -1).applyQuaternion(camObj.getWorldQuaternion(new THREE.Quaternion())).normalize();
+  updateCards(dt, gaze, camPos);
+
+  if (now - panelT > 220) { panelT = now; ensureConsole(); drawConsole(); conTex.needsUpdate = true; }   /* วาดแผงตามเดิม แม้ตอนถูกซ่อน */
+  if (TEXT_UI && !presenting && now - hudT > 250) { hudT = now; readout.textContent = hudText(); }
+
+  renderer.render(scene, presenting ? camObj : camera);
+}
+
+/* ╔══════════════════════════════════════════════════════════════════════════╗
+   ║ Section 9 — เริ่มต้น + test hook สำหรับ tools/shot.py                      ║
+   ╚══════════════════════════════════════════════════════════════════════════╝ */
+function cameraHalfAngles () {
+  const cam = renderer.xr.isPresenting ? renderer.xr.getCamera() : camera;
+  const m = (cam.projectionMatrix && cam.projectionMatrix.elements) || null;
+  if (!m || !m[5] || !m[0]) return [45 * RAD, 32 * RAD];
+  return [Math.atan(1 / m[0]), Math.atan(1 / m[5])];
+}
+/** อ่าน geometry ที่ "วาดจริง" จาก scene graph (ไม่ใช้ตัวเลขที่ stagePlan รายงาน)
+    วัดเทียบกับตำแหน่งตาจริงของ camera; rig∘world = ตัวแปลงเอกลักษณ์ ดังนั้น
+    พิกัดใน BufferAttribute = พิกัดของโลกของเวทีแสดงข้อมูล (walking เลื่อนทั้งสองกลุ่มพร้อมกัน) */
+function sceneAudit () {
+  scene.updateMatrixWorld(true);
+  const camObj = renderer.xr.isPresenting ? renderer.xr.getCamera() : camera;
+  const E = camObj.getWorldPosition(new THREE.Vector3());
+  const pts = [], others = [], pointDraw = [];
+  if (stageGroup) stageGroup.traverse((o) => {
+    if (o.isPoints) {
+      const a = o.geometry.attributes.position;
+      const store = o.userData.kind === 'projected' ? pts : others;
+      for (let i = 0; i < a.count; i++) store.push([a.getX(i), a.getY(i), a.getZ(i)]);
+      /* ขนาดจุดที่ renderer ใช้จริง (PointsMaterial.size = เส้นผ่านศูนย์กลางในหน่วยเมตรที่ระยะ 1 m) */
+      pointDraw.push({ kind: o.userData.kind === 'projected' ? 'projected' : 'raw', n: a.count, size: o.material.size,
+        opacity: o.material.opacity, attenuation: !!o.material.sizeAttenuation });
+    }
+  });
+  const pickSample = (list) => {
+    const m = Math.min(48, list.length); const out = [];
+    if (!m) return out;
+    const st = Math.max(1, Math.floor(list.length / m));
+    for (let i = 0; i < list.length && out.length < m; i += st) out.push({ i, p: list[i] });
+    return out;
+  };
+  const measure = (list) => {
+    const half = [0, 0, 0]; let rMax = 0;
+    const C = stageCenterV();
+    for (const p of list) {
+      half[0] = Math.max(half[0], Math.abs(p[0] - C.x)); half[1] = Math.max(half[1], Math.abs(p[1] - C.y)); half[2] = Math.max(half[2], Math.abs(p[2] - C.z));
+      rMax = Math.max(rMax, Math.hypot(p[0] - C.x, p[1] - C.y, p[2] - C.z));
+    }
+    return { half, rMax };
+  };
+  const eyeAt = (p) => Math.hypot(p[0] - E.x, p[1] - E.y, p[2] - E.z);
+  const all = pts.concat(others);
+  /* ความยาวแกนที่วาดจริง: อ่านจาก bounding box ของ geometry ที่ renderer ใช้วาด
+     (CylinderGeometry / ConeGeometry สร้างตามแกน +Y ของวัตถุ แล้วหมุนด้วย quaternion) */
+  const axes = [];
+  const nrm3 = (v) => { const n = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / n, v[1] / n, v[2] / n]; };
+  const crs3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const colOf = (e, i) => [e[4 * i], e[4 * i + 1], e[4 * i + 2]];   // three.js เก็บ matrix แบบ column-major, เสาละ 4 ช่อง
+  if (stageGroup) stageGroup.traverse((o) => {
+    if (o.userData.kind !== 'axis' && o.userData.kind !== 'axisHead') return;
+    const g = o.geometry; g.computeBoundingBox();
+    const bb = g.boundingBox, sc = o.getWorldScale(new THREE.Vector3());
+    const lenLocal = Math.max(bb.max.y - bb.min.y, bb.max.x - bb.min.x, bb.max.z - bb.min.z);
+    const reach = o.getWorldPosition(new THREE.Vector3()).distanceTo(stageCenterV());
+    /* ทิศที่ renderer ใช้วาดจริง = เสาหลักที่สองของ matrixWorld (local +Y ของ cylinder/cone) */
+    const drawn = nrm3(colOf(o.matrixWorld.elements, 1));
+    const want = o.userData.wantDir || null;
+    axes.push({ kind: o.userData.kind, glyph: o.userData.glyph || null, axisIndex: o.userData.axisIndex === undefined ? -1 : o.userData.axisIndex,
+      geomLen: lenLocal * Math.max(sc.x, sc.y, sc.z), reach, drawnDir: drawn, wantDir: want,
+      dirMismatch: want ? 1 - Math.abs(drawn[0] * want[0] + drawn[1] * want[1] + drawn[2] * want[2]) : null });
+  });
+  const axisMaxReach = axes.reduce((w, a) => Math.max(w, a.reach), 0);
+  const axisMaxGeomLen = axes.reduce((w, a) => Math.max(w, a.geomLen), 0);
+  /* สิ่งที่ "วาดจริง" ในเวที: แผ่นระนาบของโหมด 2 มิติ + ellipsoid — อ่านจุดมุม/ทิศ/ครึ่งแกน
+     จาก geometry และ matrixWorld แล้ววัดจุดที่ถูกฉายจริงเทียบกับแผ่นที่วาดจริงเอง
+     (ไม่ใช่เทียบกับระนาบที่คณิตศาสตร์รายงาน) */
+  let planeNow = null, ellNow = null;
+  if (stageGroup) stageGroup.traverse((o) => {
+    const kind = o.userData.kind;
+    if (kind === 'ellipsoid') {
+      const e = o.matrixWorld.elements, h = o.getWorldPosition(new THREE.Vector3());
+      ellNow = { center: [h.x, h.y, h.z], wantSemi: o.userData.semi,
+        axes: [nrm3(colOf(e, 0)), nrm3(colOf(e, 1)), nrm3(colOf(e, 2))],
+        semiDrawn: [Math.hypot(...colOf(e, 0)), Math.hypot(...colOf(e, 1)), Math.hypot(...colOf(e, 2))] };
+      return;
+    }
+    if (kind !== 'plane') return;
+    const a = o.geometry.attributes.position, seen = new Map();
+    for (let i = 0; i < a.count; i++) {
+      const p = [a.getX(i), a.getY(i), a.getZ(i)];
+      seen.set(p.map((c) => c.toFixed(6)).join(','), p);
+    }
+    const cor = [...seen.values()];
+    if (cor.length !== 4) { planeNow = { error: 'corner count = ' + cor.length }; return; }
+    const ctr = [0, 0, 0];
+    for (const p of cor) { ctr[0] += p[0] / 4; ctr[1] += p[1] / 4; ctr[2] += p[2] / 4; }
+    const sub3 = (p, q) => [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+    const eu = sub3(cor[1], cor[0]), ev = sub3(cor[3], cor[0]);
+    const lu = Math.hypot(...eu), lv = Math.hypot(...ev);
+    const u = nrm3(eu), v = nrm3(ev), n = nrm3(crs3(u, v));
+    const dg = [Math.hypot(...sub3(cor[0], cor[2])), Math.hypot(...sub3(cor[1], cor[3]))];
+    const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    planeNow = { center: ctr, corners: cor, u: u, v: v, nrm: n, half: [lu / 2, lv / 2],
+      wantHalf: o.userData.half, wantDirs: o.userData.dirs,
+      /* ตรวจว่ากรอบอ้างอิงที่อ่านจากแผ่นเป็นกรอบตั้งฉากจริง (สี่เหลี่ยมมุมฉาก ไม่ใช่ skewed) */
+      rectErr: Math.max(Math.abs(dot3(u, v)), Math.abs(dot3(n, u)), Math.abs(dot3(n, v)),
+        Math.abs(1 - Math.abs(dot3(n, n))), Math.abs(dg[0] - dg[1]) / Math.max(1e-9, dg[0])) };
+  });
+  const planeFit = (() => {
+    if (!planeNow || !planeNow.u || !pts.length) return null;
+    const off = (p, w) => (p[0] - planeNow.center[0]) * w[0] + (p[1] - planeNow.center[1]) * w[1] + (p[2] - planeNow.center[2]) * w[2];
+    let offMax = 0, overU = 0, overV = 0, outside = 0;
+    for (const p of pts) {
+      offMax = Math.max(offMax, Math.abs(off(p, planeNow.nrm)));
+      const u = off(p, planeNow.u), v = off(p, planeNow.v);
+      overU = Math.max(overU, Math.abs(u) - planeNow.half[0]); overV = Math.max(overV, Math.abs(v) - planeNow.half[1]);
+      if (Math.abs(u) > planeNow.half[0] + 1e-5 || Math.abs(v) > planeNow.half[1] + 1e-5) outside++;
+    }
+    return { offPlaneMax: offMax, overU: overU, overV: overV, pointsOutsideQuad: outside, nPoints: pts.length };
+  })();
+  const cardAudit = cards.map((cd) => {
+    const w = cd.mesh.getWorldPosition(new THREE.Vector3());
+    const horiz = Math.hypot(w.x - E.x, -(w.z - E.z));
+    const k = cd.mesh.getWorldScale(new THREE.Vector3()).x;
+    return { key: cd.key, az: Math.atan2(w.x - E.x, Math.max(0.05, -(w.z - E.z))) / RAD, elev: Math.atan2(w.y - E.y, horiz) / RAD,
+      dist: Math.hypot(w.x - E.x, w.y - E.y, w.z - E.z), y: w.y, topY: w.y + CARD_HH * k, botY: w.y - CARD_HH * k };
+  });
+  const [hh, hv] = cameraHalfAngles();
+  let maxAz = 0, maxElev = -90, minElev = 90, dMin = 1e9, dMax = 0, horizMax = 0, horizMin = 1e9, lowY = 1e9;
+  for (const p of all) {
+    const dx = p[0] - E.x, dz = p[2] - E.z;
+    maxAz = Math.max(maxAz, Math.atan2(Math.abs(dx), Math.max(0.05, -dz)));
+    const horiz = Math.hypot(dx, dz);
+    horizMax = Math.max(horizMax, horiz); horizMin = Math.min(horizMin, horiz);
+    const el = Math.atan2(p[1] - E.y, Math.max(0.05, -dz)) / RAD;
+    maxElev = Math.max(maxElev, el); minElev = Math.min(minElev, el);
+    lowY = Math.min(lowY, p[1]);
+    const dd = eyeAt(p); dMin = Math.min(dMin, dd); dMax = Math.max(dMax, dd);
+  }
+  return {
+    nProjected: pts.length, nOther: others.length, pointDraw, drawn: measure(pts), drawnAll: measure(all), axes,
+    /* ตัวอย่างจุดที่วาดจริงพร้อม index เดิมของข้อมูล → Python ตรวจ world map ได้ตรง ๆ */
+    drawnSample: pickSample(pts), rawSample: pickSample(others),
+    plane: planeNow, planeFit: planeFit, ellipsoid: ellNow,
+    eyeMin: dMin, eyeMax: dMax, halfAll: measure(all).half,
+    cardElevMin: Math.min(...cardAudit.map(c => c.elev)), cardElevMax: Math.max(...cardAudit.map(c => c.elev)), cards: cardAudit,
+    maxAzDeg: maxAz / RAD, elevMinDeg: minElev, elevMaxDeg: maxElev,
+    halfHorizDeg: hh / RAD, halfVertDeg: hv / RAD,
+    azFrac: maxAz / hh, elevFrac: (maxElev - minElev) * RAD / (2 * hv),
+    consoleElevDeg: (() => { if (!conMesh) return null; const w = conMesh.getWorldPosition(new THREE.Vector3()); return Math.atan2(w.y - E.y, Math.hypot(w.x - E.x, -(w.z - E.z))) / RAD; })(),
+    consoleTopY: conMesh ? conMesh.getWorldPosition(new THREE.Vector3()).y + CONSOLE.h / 2 : null,
+    consoleBotY: conMesh ? conMesh.getWorldPosition(new THREE.Vector3()).y - CONSOLE.h / 2 : null,
+    axisMaxReach, axisMaxGeomLen, horizMax, horizMin, lowY, eye: [E.x, E.y, E.z],
+    stageCenterWorld: (() => { const c = stageCenterV(); return [c.x, c.y, c.z]; })(),
+  };
+}
+
+window.__pca = {
+  ready: true, version: '1', state: S, math: M, stageSpec: SPEC, nSteps: M.N_STEPS,
+  clusterSpec: { k: SPEC.k, maxK: M.CLUSTER_MAX, base: M.STAGE_BASE, nearTarget: M.NEAR_TARGET,
+    limits: { longMax: SPEC.longMax, vertMax: SPEC.vertMax, depthMax: SPEC.depthMax },
+    height: SPEC.height, baseBottom: SPEC.baseBottom },
+  dotSpec: { base: DOT_BASE, scale: DOT_SCALE },
+  /** numbers ของเวทีที่ "กำลังวาดอยู่จริง" สำหรับชุดข้อมูลปัจจุบัน (shot.py ใช้เทียบกับที่คำนวณเอง) */
+  stageNow () {
+    const st = D.stage;
+    return { k: SPEC.k, scale: st.scale, binding: st.binding, bindingDist: st.bindingDist,
+      dist: st.dist, distNear: st.distNear, distWide: st.distWide, center: st.center.slice(),
+      drawn: [st.drawnLong, st.drawnVert, st.drawnDepth], worldHalf: { x: st.worldHalf.x, y: st.worldHalf.y, z: st.worldHalf.z },
+      dots: [dotSize(0), dotSize(1)] };
+  },
+  setSeed, reseed, setMode, setAlt, cycleN, toggleKey, act, buildData,
+  /** คืนข้อมูลดิบที่หน้านี้อ้างว่าเห็น (ให้ shot.py คำนวณ PCA ใหม่เองใน Python) */
+  cloud () {
+    const C = D.cloud;
+    return { seed: C.seed, n: C.n, mu: C.mu.slice(), points: C.points.map((p) => p.slice()),
+      design: { sigma: C.design.sigma.slice(), popCov: C.design.popCov.map((r) => r.slice()), R: C.design.R.map((r) => r.slice()) } };
+  },
+  basisNow: () => ({ k: D.prj.k, glyphs: D.glyphs.slice(), vectors: D.basis.map((v) => v.slice()), kind: D.kind }),
+  look (pitch, yaw) { lookPitch = clamp(pitch, -1.35, 1.25); if (typeof yaw === 'number') lookYaw = yaw; },
+  warpTo (x, z) { stepTo(x, z); },
+  settle (steps = 4) { for (let i = 0; i < steps; i++) tick(performance.now()); },
+  rebuildNow () { buildStage(); rebuilt = false; },
+  audit: sceneAudit,
+  stats () {
+    const P = D.pca, R = D.prj, ST = D.stage, A = sceneAudit();
+    return {
+      seed: P.seed, n: P.n, nIdx: S.nIdx, kind: D.kind, basisGlyphs: D.glyphs.slice(), basisDim: R.k,
+      modeK: S.modeK, altKey: S.altKey,
+      mu: P.mu.slice(), values: P.values.slice(), sigma: P.sigma.slice(), vectors: P.vectors.map(v => v.slice()),
+      explained: P.explained.slice(), cumulative: P.cumulative.slice(), trace: P.trace, det: P.det,
+      charPoly: Object.assign({}, P.charPoly), half: P.half.slice(), radius: P.radius, bbox: P.bbox.slice(),
+      jacobi: { sweeps: P.sweeps, off: P.off, residuals: P.residuals.slice(), orthoErr: P.orthoErr, lenErr: P.lenErr },
+      projection: {
+        k: R.k, keptFrac: R.keptFrac, droppedFrac: R.droppedFrac, keptVar: R.keptVar, droppedVar: R.droppedVar,
+        varResidual: R.varResidual, rmseResidual: R.rmseResidual, maxResidual: R.maxResidual,
+        sumSqResidual: R.sumSqResidual, coordVar: R.coordVar.slice(), coordVarGap: R.coordVarGap,
+        identityGap: R.identityGap, sumSqSig: R.sumSqSig,
+      },
+      altKept: D.alts.map(a => ({ key: a.key, glyph: a.glyph, kind: a.kind, basis: a.basis.map((v) => v.slice()), keptFrac: keptOf(a.basis) })),
+      planeKept: { 'v1^v2': keptOf([P.vectors[0], P.vectors[1]]), 'v1^v3': keptOf([P.vectors[0], P.vectors[2]]), 'v2^v3': keptOf([P.vectors[1], P.vectors[2]]) },
+      stage: {
+        scale: ST.scale, binding: ST.binding, drawnLong: ST.drawnLong, drawnVert: ST.drawnVert, drawnDepth: ST.drawnDepth,
+        radiusWorld: ST.radiusWorld, angularDeg: ST.angularDeg, center: ST.center.slice(),
+        dist: ST.dist, distNear: ST.distNear, distWide: ST.distWide, bindingDist: ST.bindingDist,
+        nearTarget: ST.nearTarget, height: ST.height, baseBottom: ST.baseBottom,
+        ellipsoidSemi: ST.ellipsoidSemi.map(v => v * ST.scale), dataHalf: Object.assign({}, ST.dataHalf),
+      },
+      scene: (() => { const A = sceneAudit(); return {
+        nProjected: A.nProjected, nOther: A.nOther, pointDraw: A.pointDraw, drawnHalf: A.drawn.half, drawnRadius: A.drawn.rMax,
+        allHalf: A.halfAll, allRadius: A.drawnAll.rMax, axisTips: A.axes, eyeMin: A.eyeMin, eyeMax: A.eyeMax,
+        cardElevMin: A.cardElevMin, cardElevMax: A.cardElevMax, cards: A.cards, consoleElevDeg: A.consoleElevDeg,
+        consoleTopY: A.consoleTopY, consoleBotY: A.consoleBotY,
+        drawnSample: A.drawnSample, rawSample: A.rawSample,
+        plane: A.plane, planeFit: A.planeFit, ellipsoid: A.ellipsoid,
+        maxAzDeg: A.maxAzDeg, elevMinDeg: A.elevMinDeg, elevMaxDeg: A.elevMaxDeg,
+        axisMaxReach: A.axisMaxReach, axisMaxGeomLen: A.axisMaxGeomLen, axisInfo: A.axes,
+        horizMax: A.horizMax, horizMin: A.horizMin, lowY: A.lowY, eye: A.eye, stageCenterWorld: A.stageCenterWorld,
+        halfHorizDeg: A.halfHorizDeg, halfVertDeg: A.halfVertDeg, azFrac: A.azFrac, elevFrac: A.elevFrac,
+      }; })(),
+      toggles: { ell: S.ell, drop: S.drop, center: S.center, triad: S.triad },
+      at: [S.px, S.pz], bow: S.bow, walkSpeed: S.speed, frames, seq: S.seq,
+    };
+  },
+};
+buildData(); buildStage(); buildCards(); rebuilt = false;
+renderer.setAnimationLoop(tick);
+window.__pcaReady = true;
+</script>
+</body>
+</html>

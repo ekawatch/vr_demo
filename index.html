@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<link rel="icon" href="data:,">
+<title>SCMA292 Lesson 12 — รวมสื่อการสอน XR</title>
+<style>
+:root { --fg:#e8f4ff; --dim:#9fb3c8; --acc:#4cc9f0; --warn:#ffb347; --bg:#0b1220; --card:#122033; --line:#22384d; }
+* { box-sizing:border-box; }
+html, body { margin:0; padding:0; background:var(--bg); color:var(--fg);
+  font-family: system-ui, "Noto Sans Thai", "Sarabun", sans-serif; line-height:1.5; min-height:100%; }
+header { padding:22px 20px 10px; max-width:1080px; margin:0 auto; }
+h1 { font-size:22px; color:var(--acc); margin:0 0 4px; }
+.sub { color:var(--dim); font-size:14px; }
+#xrState { margin-top:10px; font-size:14px; padding:8px 12px; border-radius:8px;
+  border:1px solid var(--line); background:#0d1626; display:inline-block; }
+#xrState.ok { border-color:#1d5a34; color:#8fe3a8; }
+#xrState.no { border-color:#5a2a1d; color:#f0b08a; }
+.grid { max-width:1080px; margin:14px auto 40px; padding:0 20px;
+  display:grid; grid-template-columns:repeat(auto-fill,minmax(310px,1fr)); gap:14px; }
+a.card { display:block; text-decoration:none; color:inherit; background:var(--card);
+  border:1px solid var(--line); border-radius:12px; padding:16px; }
+a.card:hover { border-color:var(--acc); }
+.card h2 { margin:0 0 6px; font-size:17px; color:var(--acc); }
+.card p { margin:0 0 10px; font-size:14px; color:var(--fg); }
+.tags { display:flex; flex-wrap:wrap; gap:6px; }
+.tag { font-size:11px; padding:2px 8px; border-radius:10px; border:1px solid var(--line); color:var(--dim); }
+.tag.xr { border-color:#1d5a34; color:#8fe3a8; }
+.tag.old { border-color:#5a4a1d; color:#f0d08a; }
+footer { max-width:1080px; margin:0 auto 30px; padding:0 20px; color:var(--dim); font-size:13px; }
+code { background:#0d1626; border:1px solid var(--line); border-radius:6px; padding:1px 6px; }
+.warn { color:var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <h1>SCMA292 Lesson 12 — รวมสื่อการสอน XR</h1>
+  <div class="sub">ทุกสื่อ XR ในโฟลเดอร์นี้เปิดได้จากหน้าเดียว · ต้องเปิดผ่าน <b>localhost หรือ HTTPS</b> จึงจะใช้โหมด VR/AR ได้</div>
+  <div id="xrState">กำลังตรวจว่าอุปกรณ์นี้รองรับ WebXR…</div>
+</header>
+
+<div class="grid">
+  <a class="card" href="walking_xr/">
+    <h2>Mountain Walking</h2>
+  </a>
+  <a class="card" href="3dPlots/">
+    <h2>3D Plot</h2>
+  </a>
+  <a class="card" href="parametric_curves_xr/">
+    <h2>Parametric Curve</h2>
+  </a>
+  <a class="card" href="PCA_XR/">
+    <h2>PCA</h2>
+  </a>
+  <a class="card" href="Maze/">
+    <h2>Maze First Person</h2>
+  </a>
+</div>
+
+<footer>
+  <div class="warn">บนมือถือ: WebXR ทำงานเฉพาะผ่าน <b>https://</b> หรือ localhost เท่านั้น —
+  tunnel ที่เปิดอยู่ตอนนี้: <b><a href="https://latina-charter-functioning-chester.trycloudflare.com" style="color:var(--acc)">https://latina-charter-functioning-chester.trycloudflare.com</a></b>
+  (สร้างใหม่ได้ทุกเมื่อด้วย <code>python3 -m http.server 8090</code> +
+  <code>cloudflared tunnel --url http://localhost:8090</code> แล้วเปิด URL <code>*.trycloudflare.com</code> ที่แสดงใน Terminal)</div>
+</footer>
+
+<script>
+/* ตรวจการรองรับ WebXR ของอุปกรณ์ที่เปิดหน้านี้ (โชว์เป็น badge) */
+(async () => {
+  const el = document.getElementById('xrState');
+  if (!('xr' in navigator)) { el.textContent = 'อุปกรณ์/เบราว์เซอร์นี้ไม่รองรับ WebXR → เปิดแต่ละสื่อในโหมดจอธรรมดา (fallback) ได้'; el.className = 'no'; return; }
+  try {
+    const vr = await navigator.xr.isSessionSupported('immersive-vr');
+    const ar = vr ? false : await navigator.xr.isSessionSupported('immersive-ar');
+    if (vr || ar) { el.textContent = '✓ อุปกรณ์นี้รองรับ WebXR (' + (vr ? 'immersive-vr' : 'immersive-ar') + ') — กดปุ่มเข้าโหมด VR/AR ในแต่ละสื่อได้'; el.className = 'ok'; }
+    else { el.textContent = 'เบราว์เซอร์มี WebXR แต่ไม่พบโหมด VR/AR ในอุปกรณ์นี้ → ใช้โหมดจอธรรมดา'; el.className = 'no'; }
+  } catch (e) { el.textContent = 'ตรวจ WebXR ไม่ได้: ' + e.message; el.className = 'no'; }
+})();
+</script>
+</body>
+</html>
